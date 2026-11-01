@@ -96,12 +96,7 @@ async function runCampaign(list, message, min, max, isTest) {
 const app = express();
 app.use(basicAuth({ users: { [APP_USER]: APP_PASSWORD }, challenge: true }));
 app.use(express.json({ limit: '10mb' }));
-const fs2 = require('fs');
-const pubDir = fs2.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
-app.use(express.static(pubDir, { index: 'index.html' }));
-app.get('/', (req, res) => res.sendFile(path.join(pubDir, 'index.html'), err => {
-  if (err) res.status(500).send('index.html introuvable : placez-le dans le dossier public/');
-}));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/state', (req, res) => {
   const counts = Object.fromEntries(STATUSES.map(s => [s, db.contacts.filter(c => c.status === s).length]));
@@ -111,7 +106,10 @@ app.get('/api/contacts', (req, res) => {
   const { status, q } = req.query;
   let l = db.contacts;
   if (status) l = l.filter(c => c.status === status);
-  if (q) l = l.filter(c => (c.email + c.phone).toLowerCase().includes(String(q).toLowerCase()));
+  if (q) {
+    const ql = String(q).toLowerCase().trim(), qd = ql.replace(/\D/g, '');
+    l = l.filter(c => c.email.toLowerCase().includes(ql) || (qd && c.phone.includes(qd)));
+  }
   res.json(l);
 });
 app.post('/api/contacts', (req, res) => {
@@ -120,6 +118,12 @@ app.post('/api/contacts', (req, res) => {
   save(); res.json(r);
 });
 app.delete('/api/contacts/:id', (req, res) => { db.contacts = db.contacts.filter(c => c.id !== req.params.id); save(); res.json({ ok: true }); });
+app.post('/api/contacts/delete', (req, res) => {
+  const ids = new Set(Array.isArray(req.body.ids) ? req.body.ids : []);
+  const before = db.contacts.length;
+  db.contacts = db.contacts.filter(c => !ids.has(c.id));
+  save(); res.json({ deleted: before - db.contacts.length });
+});
 app.delete('/api/contacts', (req, res) => { db.contacts = []; save(); res.json({ ok: true }); });
 
 app.post('/api/import', (req, res) => {
