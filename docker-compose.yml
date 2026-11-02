@@ -2,11 +2,29 @@ services:
   app:
     build: .
     container_name: qgis_send_bot
-    hostname: qgis_send_bot
+    hostname: qgis_send_bot        # hostname fixe : évite les conflits de verrou Chromium au redémarrage
     restart: unless-stopped
     env_file: .env
-    shm_size: "1gb"
+    shm_size: "1gb"               # Chromium a besoin de mémoire partagée
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data          # session WhatsApp + contacts (à sauvegarder)
+    expose:
+      - "3010"                    # non publié sur Internet, uniquement visible par Caddy
+
+  caddy:
+    image: caddy:2
+    container_name: qgis-caddy
+    restart: unless-stopped
+    depends_on:
+      - app
     ports:
-      - "127.0.0.1:3010:3010"   # visible seulement depuis le VPS, pas depuis Internet
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # certificats Let's Encrypt
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
