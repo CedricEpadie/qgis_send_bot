@@ -1,0 +1,5 @@
+# Remplacez par votre vrai nom de domaine
+qgissendbot.duckdns.org {
+    encode gzip
+    reverse_proxy app:3010
+}
