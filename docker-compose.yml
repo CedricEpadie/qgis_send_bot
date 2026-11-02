@@ -2,29 +2,11 @@ services:
   app:
     build: .
     container_name: wa-broadcast
-    hostname: wa-broadcast        # hostname fixe : évite les conflits de verrou Chromium au redémarrage
+    hostname: wa-broadcast
     restart: unless-stopped
     env_file: .env
-    shm_size: "1gb"               # Chromium a besoin de mémoire partagée
+    shm_size: "1gb"
     volumes:
-      - ./data:/app/data          # session WhatsApp + contacts (à sauvegarder)
-    expose:
-      - "3010"                    # non publié sur Internet, uniquement visible par Caddy
-
-  caddy:
-    image: caddy:2
-    container_name: wa-caddy
-    restart: unless-stopped
-    depends_on:
-      - app
+      - ./data:/app/data
     ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data          # certificats Let's Encrypt
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
+      - "127.0.0.1:3010:3010"   # visible seulement depuis le VPS, pas depuis Internet
