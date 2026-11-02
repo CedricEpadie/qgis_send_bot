@@ -1,8 +1,8 @@
 services:
   app:
     build: .
-    container_name: wa-broadcast
-    hostname: wa-broadcast
+    container_name: qgis_send_bot
+    hostname: qgis_send_bot
     restart: unless-stopped
     env_file: .env
     shm_size: "1gb"
