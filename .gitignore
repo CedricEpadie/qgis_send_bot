@@ -30,6 +30,7 @@ pids/
 .npm/
 .yarn/cache/
 .pnpm-store/
+data/
 
 # Editor and operating-system files
 .vscode/

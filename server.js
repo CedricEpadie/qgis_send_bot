@@ -96,7 +96,13 @@ async function runCampaign(list, message, min, max, isTest) {
 const app = express();
 app.use(basicAuth({ users: { [APP_USER]: APP_PASSWORD }, challenge: true }));
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+
+const fs2 = require('fs');
+const pubDir = fs2.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
+app.use(express.static(pubDir, { index: 'index.html' }));
+app.get('/', (req, res) => res.sendFile(path.join(pubDir, 'index.html'), err => {
+  if (err) res.status(500).send('index.html introuvable : placez-le dans le dossier public/');
+}));
 
 app.get('/api/state', (req, res) => {
   const counts = Object.fromEntries(STATUSES.map(s => [s, db.contacts.filter(c => c.status === s).length]));
