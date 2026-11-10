@@ -58,8 +58,19 @@ th{color:var(--mute);font-weight:600}
   <p class="sub">Sur votre téléphone : WhatsApp → Paramètres → Appareils connectés → Connecter un appareil.</p>
   <div class="box">
     <p>État : <span id="wastate" class="pill">…</span> <span id="wanum"></span></p>
+    <p id="waerr" class="hint" style="display:none;color:var(--warn)"></p>
     <img id="qr" alt="QR code WhatsApp" style="display:none;margin:10px 0;border-radius:8px">
-    <button class="b alt" id="logout" style="display:none">Déconnecter ce compte</button>
+    <div class="row" style="margin-top:10px">
+      <button class="b alt" id="retry" style="display:none">Réessayer</button>
+      <button class="b alt" id="reset" style="display:none">Changer de numéro / nouveau QR code</button>
+    </div>
+  </div>
+  <h2 style="font-size:16px;margin-top:28px">Numéros enregistrés</h2>
+  <p class="sub">Chaque numéro garde sa propre session : vous pouvez basculer de l’un à l’autre sans rescanner de QR code. Un seul numéro est actif à la fois.</p>
+  <div class="box" id="sessbox"></div>
+  <div class="row" style="margin-top:12px">
+    <input id="sess_name" placeholder="Nom du nouveau numéro (ex. Association)" maxlength="40">
+    <button class="b" id="sess_add">+ Ajouter un numéro</button>
   </div>
 </section>
 
@@ -139,13 +150,17 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,section').forEach(e=>e.classList.remove('on'));b.classList.add('on');$(b.dataset.t).classList.add('on');if(b.dataset.t==='hist')loadLogs();if(b.dataset.t==='cont')loadContacts()});
 
 let S=null,tplLoaded=false;
-const LABELS={starting:'Démarrage…',qr:'QR code à scanner',authenticated:'Authentifié…',ready:'Connecté',disconnected:'Déconnecté'};
+const LABELS={starting:'Démarrage…',qr:'QR code à scanner',authenticated:'Authentifié…',ready:'Connecté',disconnected:'Déconnecté',error:'Erreur',stopped:'En veille',none:'Aucun numéro'};
 async function refresh(){
   try{S=await api('/api/state')}catch{return}
   const w=S.wa;$('wastate').textContent=LABELS[w.status]||w.status;$('wastate').className='pill '+(w.status==='ready'?'ready':w.status==='qr'?'qr':'');
   $('wanum').textContent=w.number?'+'+w.number:'';
   $('qr').style.display=w.qr?'block':'none';if(w.qr)$('qr').src=w.qr;
-  $('logout').style.display=w.status==='ready'?'inline-block':'none';
+  $('wastate').className='pill '+(w.status==='ready'?'ready':['qr','error'].includes(w.status)?'qr':'');
+  $('waerr').textContent=w.error||'';$('waerr').style.display=w.error?'block':'none';
+  $('retry').style.display=w.id&&['error','disconnected','stopped'].includes(w.status)?'inline-block':'none';
+  $('reset').style.display=w.id?'inline-block':'none';
+  renderSessions();
   $('navstate').textContent=w.status==='ready'?'● WhatsApp connecté':'○ Non connecté';
   $('stats').innerHTML=`<div class="stat"><b>${S.total}</b><span>Contacts</span></div>`+Object.entries(S.counts).map(([k,v])=>`<div class="stat"><b>${v}</b><span>${esc(k)}</span></div>`).join('');
   $('s_count').textContent=`${S.counts[$('s_status').value]||0} contact(s) dans ce groupe (maximum ${S.maxPerRun} par envoi).`;
@@ -154,6 +169,19 @@ async function refresh(){
   const done=j.sent+j.failed+j.skipped;$('bar').style.width=(j.total?done/j.total*100:0)+'%';
   $('prog').textContent=j.total?`${done}/${j.total} traités — ${j.sent} envoyés, ${j.skipped} ignorés, ${j.failed} échecs${j.running?' · en cours : '+j.current:''}`:'Aucun envoi en cours.';
 }
+let lastSess='';
+function renderSessions(){
+  const h=JSON.stringify(S.sessions);if(h===lastSess)return;lastSess=h;
+  $('sessbox').innerHTML=S.sessions.sessions.map(x=>`<div class="row" style="align-items:center;margin:6px 0"><div style="flex:2"><b>${esc(x.name)}</b> ${x.number?'+'+esc(x.number):''}${x.active?' <span class="pill ready">actif</span>':''}<div class="hint">${esc(LABELS[x.status]||x.status)}${x.error?' — '+esc(x.error):''}</div></div>${x.active?'':`<button class="b alt" data-a="activate" data-id="${esc(x.id)}">Utiliser</button>`}<button class="b alt" data-a="rename" data-id="${esc(x.id)}">Renommer</button><button class="b alt" data-a="remove" data-id="${esc(x.id)}">Supprimer</button></div>`).join('')||'<p class="hint">Aucun numéro enregistré.</p>';
+}
+async function sessCall(url,method,body){try{await api(url,{method,body})}catch(e){alert(e.message)}lastSess='';refresh()}
+$('sessbox').onclick=e=>{const b=e.target.closest('button[data-a]');if(!b)return;const id=b.dataset.id,a=b.dataset.a,x=S.sessions.sessions.find(v=>v.id===id);if(!x)return;
+  if(a==='activate')sessCall(`/api/sessions/${id}/activate`,'POST');
+  else if(a==='rename'){const n=prompt('Nouveau nom :',x.name);if(n)sessCall(`/api/sessions/${id}`,'PUT',{name:n})}
+  else if(a==='remove'&&confirm(`Supprimer « ${x.name} » et sa session WhatsApp ?`))sessCall(`/api/sessions/${id}`,'DELETE')};
+$('sess_add').onclick=()=>{sessCall('/api/sessions','POST',{name:$('sess_name').value});$('sess_name').value=''};
+$('retry').onclick=()=>sessCall(`/api/sessions/${S.wa.id}/restart`,'POST');
+$('reset').onclick=()=>confirm('Effacer la session de ce numéro et demander un nouveau QR code ?')&&sessCall(`/api/sessions/${S.wa.id}/reset`,'POST');
 setInterval(refresh,2000);refresh();
 
 let CUR=[],SEL=new Set();
@@ -189,7 +217,6 @@ $('go').onclick=async()=>{const n=S.counts[$('s_status').value];if(!confirm(`Env
   try{const r=await api('/api/send',{method:'POST',body:payload()});toast(`Envoi lancé : ${r.started} destinataire(s).`)}catch(e){toast(e.message)}};
 $('stop').onclick=()=>api('/api/stop',{method:'POST'}).then(()=>toast('Arrêt demandé.'));
 $('reset').onclick=()=>api('/api/reset-sent',{method:'POST'}).then(()=>{toast('Marqueurs réinitialisés.');loadContacts()});
-$('logout').onclick=()=>confirm('Déconnecter WhatsApp ?')&&api('/api/logout',{method:'POST'});
 async function loadLogs(){const l=await api('/api/logs');$('logs').innerHTML=l.map(x=>`<tr><td>${new Date(x.t).toLocaleString('fr-FR')}</td><td>${esc(x.email||'')} +${x.phone}</td><td>${esc(x.status)}</td><td>${esc(x.result)}${x.error?' — '+esc(x.error):''}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">Aucun envoi pour le moment.</td></tr>'}
 </script>
 </body>

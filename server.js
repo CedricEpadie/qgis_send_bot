@@ -2,11 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const basicAuth = require('express-basic-auth');
 const { parse } = require('csv-parse/sync');
-const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const { PORT = 3000, APP_USER = 'admin', APP_PASSWORD, DEFAULT_COUNTRY_CODE = '', MAX_PER_RUN = 300 } = process.env;
 if (!APP_PASSWORD) { console.error('Définissez APP_PASSWORD dans le fichier .env'); process.exit(1); }
@@ -54,24 +52,16 @@ function upsert({ email, status, phone }) {
 }
 
 /* ---------- Client WhatsApp ---------- */
-let waStatus = 'starting', qrImage = null, waNumber = null;
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: path.join(DATA, 'session') }),
-  puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] }
-});
-client.on('qr', async qr => { waStatus = 'qr'; qrImage = await QRCode.toDataURL(qr, { width: 280 }); });
-client.on('authenticated', () => { waStatus = 'authenticated'; qrImage = null; });
-client.on('ready', () => { waStatus = 'ready'; qrImage = null; waNumber = client.info?.wid?.user || null; });
-client.on('auth_failure', () => { waStatus = 'disconnected'; });
-client.on('disconnected', () => { waStatus = 'disconnected'; waNumber = null; setTimeout(() => client.initialize().catch(() => {}), 3000); });
-client.initialize().catch(e => { console.error(e); waStatus = 'disconnected'; });
+const SessionManager = require('./sessions');
+const sessions = new SessionManager({ dataDir: DATA });
+sessions.init().catch(e => console.error('Initialisation des sessions :', e));
 
 /* ---------- Campagne ---------- */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const render = (t, c) => t.replace(/\{email\}/g, c.email || '').replace(/\{phone\}/g, c.phone);
 let job = { running: false, total: 0, sent: 0, failed: 0, skipped: 0, current: '', stop: false };
 
-async function runCampaign(list, message, min, max, isTest) {
+async function runCampaign(client, list, message, min, max, isTest) {
   job = { running: true, total: list.length, sent: 0, failed: 0, skipped: 0, current: '', stop: false };
   for (const c of list) {
     if (job.stop) break;
@@ -106,7 +96,7 @@ app.get('/', (req, res) => res.sendFile(path.join(pubDir, 'index.html'), err => 
 
 app.get('/api/state', (req, res) => {
   const counts = Object.fromEntries(STATUSES.map(s => [s, db.contacts.filter(c => c.status === s).length]));
-  res.json({ wa: { status: waStatus, qr: qrImage, number: waNumber }, counts, total: db.contacts.length, templates: db.templates, job, maxPerRun: +MAX_PER_RUN });
+  res.json({ wa: sessions.activeState(), sessions: sessions.list(), counts, total: db.contacts.length, templates: db.templates, job, maxPerRun: +MAX_PER_RUN });
 });
 app.get('/api/contacts', (req, res) => {
   const { status, q } = req.query;
@@ -152,7 +142,8 @@ app.get('/api/export.csv', (req, res) => {
 app.put('/api/templates', (req, res) => { db.templates = { ...db.templates, ...req.body }; save(); res.json({ ok: true }); });
 
 app.post('/api/send', (req, res) => {
-  if (waStatus !== 'ready') return res.status(400).json({ error: 'WhatsApp n’est pas connecté.' });
+  const client = sessions.readyClient();
+  if (!client) return res.status(400).json({ error: 'WhatsApp n’est pas connecté.' });
   if (job.running) return res.status(400).json({ error: 'Un envoi est déjà en cours.' });
   const { status, message, testNumber, skipContacted = true } = req.body;
   const min = Math.max(3, +req.body.delayMin || 8), max = Math.max(min, +req.body.delayMax || 20);
@@ -166,17 +157,28 @@ app.post('/api/send', (req, res) => {
     list = db.contacts.filter(c => c.status === status && !(skipContacted && c.lastSentAt)).slice(0, +MAX_PER_RUN);
   }
   if (!list.length) return res.status(400).json({ error: 'Aucun destinataire pour ce filtre.' });
-  runCampaign(list, message, min, max, !!testNumber);
+  runCampaign(client, list, message, min, max, !!testNumber);
   res.json({ started: list.length });
 });
 app.post('/api/stop', (req, res) => { job.stop = true; res.json({ ok: true }); });
 app.post('/api/reset-sent', (req, res) => { db.contacts.forEach(c => (c.lastSentAt = null)); save(); res.json({ ok: true }); });
 app.get('/api/logs', (req, res) => res.json(db.logs.slice(-300).reverse()));
-app.post('/api/logout', async (req, res) => {
-  try { await client.logout(); } catch {}
-  waStatus = 'starting'; qrImage = null;
-  client.initialize().catch(() => {});
-  res.json({ ok: true });
-});
+/* ---------- Sessions WhatsApp ---------- */
+const sess = fn => async (req, res) => {
+  try {
+    if (job.running) return res.status(409).json({ error: 'Un envoi est en cours : arrêtez-le avant de modifier les sessions.' });
+    res.json((await fn(req)) || { ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+};
+app.get('/api/sessions', (req, res) => res.json(sessions.list()));
+app.post('/api/sessions', sess(req => sessions.add(req.body.name)));
+app.put('/api/sessions/:id', (req, res) => { try { res.json(sessions.rename(req.params.id, req.body.name)); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/sessions/:id/activate', sess(req => sessions.activate(req.params.id)));
+app.post('/api/sessions/:id/restart', sess(req => sessions.restart(req.params.id)));
+app.post('/api/sessions/:id/reset', sess(req => sessions.reset(req.params.id)));
+app.delete('/api/sessions/:id', sess(req => sessions.remove(req.params.id)));
+
+const stop = () => sessions.shutdown().finally(() => process.exit(0));
+process.on('SIGTERM', stop); process.on('SIGINT', stop);
 
 app.listen(PORT, () => console.log(`Interface disponible sur http://localhost:${PORT}`));
