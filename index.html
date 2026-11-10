@@ -61,8 +61,8 @@ th{color:var(--mute);font-weight:600}
     <p id="waerr" class="hint" style="display:none;color:var(--warn)"></p>
     <img id="qr" alt="QR code WhatsApp" style="display:none;margin:10px 0;border-radius:8px">
     <div class="row" style="margin-top:10px">
-      <button class="b alt" id="retry" style="display:none">Réessayer</button>
-      <button class="b alt" id="reset" style="display:none">Changer de numéro / nouveau QR code</button>
+      <button class="b alt" id="sess_retry" style="display:none">Réessayer</button>
+      <button class="b alt" id="sess_reset" style="display:none">Changer de numéro / nouveau QR code</button>
     </div>
   </div>
   <h2 style="font-size:16px;margin-top:28px">Numéros enregistrés</h2>
@@ -128,15 +128,16 @@ th{color:var(--mute);font-weight:600}
     <div class="row"><input id="t_num" placeholder="Votre numéro (+237…)"><button class="b alt" id="test">Envoyer le test</button></div>
   </div>
   <div class="box">
-    <div class="row"><button class="b" id="go">Lancer l’envoi</button><button class="b red" id="stop" disabled>Arrêter</button></div>
+    <div class="row"><button class="b" id="go">Lancer l’envoi</button><button class="b alt" id="pause" style="display:none">Pause</button><button class="b" id="resume" style="display:none">Reprendre</button><button class="b red" id="stop" style="display:none">Arrêter</button></div>
     <div class="bar"><i id="bar"></i></div>
-    <p id="prog" class="hint">Aucun envoi en cours.</p>
+    <p id="prog" class="hint">Aucun envoi pour le moment.</p>
   </div>
 </section>
 
 <section id="hist">
   <h2>Historique</h2>
-  <p class="sub">Les 300 derniers envois.</p>
+  <p class="sub">Campagnes récentes, puis les 300 derniers envois.</p>
+  <div class="box"><table><thead><tr><th>Date</th><th>Groupe</th><th>Numéro</th><th>Statut</th><th>Résultat</th></tr></thead><tbody id="camps"></tbody></table></div>
   <div class="box"><table><thead><tr><th>Date</th><th>Contact</th><th>Groupe</th><th>Résultat</th></tr></thead><tbody id="logs"></tbody></table></div>
 </section>
 
@@ -150,6 +151,7 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,section').forEach(e=>e.classList.remove('on'));b.classList.add('on');$(b.dataset.t).classList.add('on');if(b.dataset.t==='hist')loadLogs();if(b.dataset.t==='cont')loadContacts()});
 
 let S=null,tplLoaded=false;
+const CL={running:'En cours',paused:'En pause',completed:'Terminée',stopped:'Arrêtée'};
 const LABELS={starting:'Démarrage…',qr:'QR code à scanner',authenticated:'Authentifié…',ready:'Connecté',disconnected:'Déconnecté',error:'Erreur',stopped:'En veille',none:'Aucun numéro'};
 async function refresh(){
   try{S=await api('/api/state')}catch{return}
@@ -158,16 +160,20 @@ async function refresh(){
   $('qr').style.display=w.qr?'block':'none';if(w.qr)$('qr').src=w.qr;
   $('wastate').className='pill '+(w.status==='ready'?'ready':['qr','error'].includes(w.status)?'qr':'');
   $('waerr').textContent=w.error||'';$('waerr').style.display=w.error?'block':'none';
-  $('retry').style.display=w.id&&['error','disconnected','stopped'].includes(w.status)?'inline-block':'none';
-  $('reset').style.display=w.id?'inline-block':'none';
+  $('sess_retry').style.display=w.id&&['error','disconnected','stopped'].includes(w.status)?'inline-block':'none';
+  $('sess_reset').style.display=w.id?'inline-block':'none';
   renderSessions();
   $('navstate').textContent=w.status==='ready'?'● WhatsApp connecté':'○ Non connecté';
   $('stats').innerHTML=`<div class="stat"><b>${S.total}</b><span>Contacts</span></div>`+Object.entries(S.counts).map(([k,v])=>`<div class="stat"><b>${v}</b><span>${esc(k)}</span></div>`).join('');
   $('s_count').textContent=`${S.counts[$('s_status').value]||0} contact(s) dans ce groupe (maximum ${S.maxPerRun} par envoi).`;
   if(!tplLoaded){tplLoaded=true;$('s_msg').value=S.templates[$('s_status').value]||''}
-  const j=S.job;$('go').disabled=j.running;$('test').disabled=j.running;$('stop').disabled=!j.running;
-  const done=j.sent+j.failed+j.skipped;$('bar').style.width=(j.total?done/j.total*100:0)+'%';
-  $('prog').textContent=j.total?`${done}/${j.total} traités — ${j.sent} envoyés, ${j.skipped} ignorés, ${j.failed} échecs${j.running?' · en cours : '+j.current:''}`:'Aucun envoi en cours.';
+  const c=S.campaign,open=!!c&&['running','paused'].includes(c.status);
+  $('go').disabled=open;$('test').disabled=open;
+  $('pause').style.display=open&&c.status==='running'?'inline-block':'none';$('pause').disabled=open&&c.pausing;
+  $('resume').style.display=open&&c.status==='paused'?'inline-block':'none';
+  $('stop').style.display=open?'inline-block':'none';
+  const done=c?c.sent+c.failed+c.skipped:0;$('bar').style.width=(c&&c.total?(done+c.cancelled)/c.total*100:0)+'%';
+  $('prog').textContent=!c?'Aucun envoi pour le moment.':`${CL[c.status]}${c.isTest?' (test)':''}${c.sessionLabel?' · '+c.sessionLabel:''} — ${done}/${c.total} traités : ${c.sent} envoyés, ${c.skipped} ignorés, ${c.failed} échecs${c.pending?', '+c.pending+' restants':''}${c.current?' · en cours : '+c.current:''}${c.pausing?' · pause en cours…':''}${c.note?' · '+c.note:''}`;
 }
 let lastSess='';
 function renderSessions(){
@@ -180,8 +186,8 @@ $('sessbox').onclick=e=>{const b=e.target.closest('button[data-a]');if(!b)return
   else if(a==='rename'){const n=prompt('Nouveau nom :',x.name);if(n)sessCall(`/api/sessions/${id}`,'PUT',{name:n})}
   else if(a==='remove'&&confirm(`Supprimer « ${x.name} » et sa session WhatsApp ?`))sessCall(`/api/sessions/${id}`,'DELETE')};
 $('sess_add').onclick=()=>{sessCall('/api/sessions','POST',{name:$('sess_name').value});$('sess_name').value=''};
-$('retry').onclick=()=>sessCall(`/api/sessions/${S.wa.id}/restart`,'POST');
-$('reset').onclick=()=>confirm('Effacer la session de ce numéro et demander un nouveau QR code ?')&&sessCall(`/api/sessions/${S.wa.id}/reset`,'POST');
+$('sess_retry').onclick=()=>sessCall(`/api/sessions/${S.wa.id}/restart`,'POST');
+$('sess_reset').onclick=()=>confirm('Effacer la session de ce numéro et demander un nouveau QR code ?')&&sessCall(`/api/sessions/${S.wa.id}/reset`,'POST');
 setInterval(refresh,2000);refresh();
 
 let CUR=[],SEL=new Set();
@@ -215,9 +221,14 @@ const payload=()=>({status:$('s_status').value,message:$('s_msg').value,delayMin
 $('test').onclick=async()=>{try{await api('/api/send',{method:'POST',body:{...payload(),testNumber:$('t_num').value}});toast('Test envoyé.')}catch(e){toast(e.message)}};
 $('go').onclick=async()=>{const n=S.counts[$('s_status').value];if(!confirm(`Envoyer ce message au groupe « ${$('s_status').value} » (${n} contact(s)) ?`))return;
   try{const r=await api('/api/send',{method:'POST',body:payload()});toast(`Envoi lancé : ${r.started} destinataire(s).`)}catch(e){toast(e.message)}};
-$('stop').onclick=()=>api('/api/stop',{method:'POST'}).then(()=>toast('Arrêt demandé.'));
+const camp=(act,msg)=>api('/api/campaign/'+act,{method:'POST'}).then(()=>{toast(msg);refresh()}).catch(e=>toast(e.message));
+$('pause').onclick=()=>camp('pause','Pause demandée : fin du message en cours…');
+$('resume').onclick=()=>camp('resume','Envoi repris avec le numéro actif.');
+$('stop').onclick=()=>confirm('Arrêter définitivement cette campagne ? Les messages restants ne seront pas envoyés.')&&camp('stop','Campagne arrêtée.');
 $('reset').onclick=()=>api('/api/reset-sent',{method:'POST'}).then(()=>{toast('Marqueurs réinitialisés.');loadContacts()});
-async function loadLogs(){const l=await api('/api/logs');$('logs').innerHTML=l.map(x=>`<tr><td>${new Date(x.t).toLocaleString('fr-FR')}</td><td>${esc(x.email||'')} +${x.phone}</td><td>${esc(x.status)}</td><td>${esc(x.result)}${x.error?' — '+esc(x.error):''}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">Aucun envoi pour le moment.</td></tr>'}
+async function loadLogs(){const [l,cs]=await Promise.all([api('/api/logs'),api('/api/campaigns')]);
+  $('camps').innerHTML=cs.map(c=>`<tr><td>${new Date(c.created_at).toLocaleString('fr-FR')}</td><td>${c.is_test?'Test':esc(c.group_status||'')}</td><td>${esc(c.session_label||'—')}</td><td>${esc(CL[c.status]||c.status)}</td><td>${c.sent} envoyés · ${c.skipped} ignorés · ${c.failed} échecs${c.pending?' · '+c.pending+' restants':''}${c.cancelled?' · '+c.cancelled+' annulés':''}</td></tr>`).join('')||'<tr><td colspan="5" class="hint">Aucune campagne pour le moment.</td></tr>';
+  $('logs').innerHTML=l.map(x=>`<tr><td>${new Date(x.t).toLocaleString('fr-FR')}</td><td>${esc(x.email||'')} +${esc(x.phone)}</td><td>${esc(x.status)}</td><td>${esc(x.result)}${x.error?' — '+esc(x.error):''}</td></tr>`).join('')||'<tr><td colspan="4" class="hint">Aucun envoi pour le moment.</td></tr>'}
 </script>
 </body>
 </html>

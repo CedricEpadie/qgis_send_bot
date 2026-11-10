@@ -13,13 +13,18 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 
 WORKDIR /app
 
-# package-lock.json est ignoré par le .gitignore du projet -> npm install
+# package-lock.json est ignoré par le .gitignore du projet -> npm install.
+# better-sqlite3 télécharge un binaire précompilé ; à défaut, on installe les outils de compilation.
 COPY package.json ./
-RUN npm install --omit=dev && npm cache clean --force
+RUN npm install --omit=dev \
+ || (apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
+     && npm install --omit=dev \
+     && apt-get purge -y python3 make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*) \
+ && npm cache clean --force
 
 COPY . .
 
-# Dossier data = session WhatsApp + base de contacts (monté en volume)
+# Dossier data = sessions WhatsApp + base SQLite (monté en volume)
 RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
