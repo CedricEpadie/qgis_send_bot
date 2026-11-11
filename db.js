@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { DATA } = require('./config');
 const { normPhone, normStatus } = require('./normalize');
 const { HttpError } = require('./http');
+const limits = require('./limits');
 
 const db = new Database(path.join(DATA, 'app.db'));
 db.pragma('journal_mode = WAL');
@@ -33,6 +34,15 @@ CREATE TABLE IF NOT EXISTS logs(
   email TEXT NOT NULL DEFAULT '', status TEXT, result TEXT NOT NULL, error TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS segments(name TEXT PRIMARY KEY COLLATE NOCASE, template TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS replies(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, session_id TEXT, phone TEXT NOT NULL,
+  contact_id TEXT, body TEXT NOT NULL DEFAULT '', optout INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS api_keys(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+  created_by TEXT, created_at TEXT NOT NULL, last_used_at TEXT);
+CREATE TABLE IF NOT EXISTS webhooks(
+  id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, last_status TEXT, last_at TEXT);
 CREATE TABLE IF NOT EXISTS users(
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL);
@@ -44,10 +54,14 @@ const addCol = (t, c, def) => { if (!db.prepare(`PRAGMA table_info(${t})`).all()
 addCol('contacts', 'name', "TEXT NOT NULL DEFAULT ''");        // NB : la colonne contacts.status contient le SEGMENT
 addCol('campaign_items', 'name', "TEXT NOT NULL DEFAULT ''");
 addCol('campaigns', 'created_by', 'TEXT');
+addCol('campaigns', 'auto_resume', 'INTEGER NOT NULL DEFAULT 0');
+addCol('contacts', 'opted_out', 'INTEGER NOT NULL DEFAULT 0');
+addCol('contacts', 'opted_out_at', 'TEXT');
+addCol('logs', 'session_id', 'TEXT');
 
 const now = () => new Date().toISOString();
 const like = s => '%' + String(s).replace(/[\\%_]/g, '\\$&') + '%';
-const toContact = r => ({ id: r.id, phone: r.phone, name: r.name, email: r.email, segment: r.status, lastSentAt: r.last_sent_at });
+const toContact = r => ({ id: r.id, phone: r.phone, name: r.name, email: r.email, segment: r.status, lastSentAt: r.last_sent_at, optedOut: !!r.opted_out });
 
 /* ---------- Segments (groupes libres) ---------- */
 const DEFAULT_TEMPLATES = {
@@ -136,14 +150,19 @@ const contacts = {
     db.prepare('INSERT INTO contacts(id, phone, name, email, status, created_at) VALUES (?,?,?,?,?,?)').run(crypto.randomUUID(), p, nm, em, seg, now());
     return { added: true };
   },
-  update(id, { phone, name, email, segment }) {
+  update(id, { phone, name, email, segment, optedOut }) {
     const p = normPhone(phone), seg = segments.resolve(segment);
     if (!db.prepare('SELECT 1 FROM contacts WHERE id = ?').get(id)) throw new HttpError(404, 'Contact introuvable.');
     if (!p) throw new HttpError(400, 'Numéro invalide.');
     if (!seg) throw new HttpError(400, 'Segment manquant.');
     if (db.prepare('SELECT 1 FROM contacts WHERE phone = ? AND id != ?').get(p, id)) throw new HttpError(409, 'Ce numéro existe déjà.');
     db.prepare('UPDATE contacts SET phone = ?, name = ?, email = ?, status = ? WHERE id = ?').run(p, String(name || '').trim().slice(0, 80), String(email || '').trim(), seg, id);
+    if (optedOut !== undefined) contacts.setOptedOut(id, !!optedOut);
   },
+  setOptedOut: (id, flag) => db.prepare('UPDATE contacts SET opted_out = ?, opted_out_at = ? WHERE id = ?').run(flag ? 1 : 0, flag ? now() : null, id).changes,
+  isOptedOut: id => !!db.prepare('SELECT 1 FROM contacts WHERE id = ? AND opted_out = 1').get(id),
+  byPhone: phone => { const r = db.prepare('SELECT * FROM contacts WHERE phone = ?').get(String(phone || '')); return r ? toContact(r) : null; },
+  optedOutCount: segment => db.prepare('SELECT COUNT(*) AS n FROM contacts WHERE status = ? AND opted_out = 1').get(segment).n,
   importRows: db.transaction(rows => rows.map(r => contacts.upsert(r))),
   exists: id => !!db.prepare('SELECT 1 FROM contacts WHERE id = ?').get(id),
   remove: id => db.prepare('DELETE FROM contacts WHERE id = ?').run(id).changes,
@@ -151,8 +170,8 @@ const contacts = {
   removeAll: () => db.prepare('DELETE FROM contacts').run().changes,
   resetSent: () => db.prepare('UPDATE contacts SET last_sent_at = NULL').run().changes,
   total: () => db.prepare('SELECT COUNT(*) AS n FROM contacts').get().n,
-  recipients: (segment, skip, limit) => db.prepare(`SELECT * FROM contacts WHERE status = ? ${skip ? 'AND last_sent_at IS NULL' : ''} ORDER BY created_at, rowid LIMIT ?`).all(segment, limit).map(toContact),
-  eligible: (segment, skip) => db.prepare(`SELECT COUNT(*) AS n FROM contacts WHERE status = ? ${skip ? 'AND last_sent_at IS NULL' : ''}`).get(segment).n,
+  recipients: (segment, skip, limit) => db.prepare(`SELECT * FROM contacts WHERE status = ? AND opted_out = 0 ${skip ? 'AND last_sent_at IS NULL' : ''} ORDER BY created_at, rowid LIMIT ?`).all(segment, limit).map(toContact),
+  eligible: (segment, skip) => db.prepare(`SELECT COUNT(*) AS n FROM contacts WHERE status = ? AND opted_out = 0 ${skip ? 'AND last_sent_at IS NULL' : ''}`).get(segment).n,
 };
 
 /* ---------- Campagnes persistantes ---------- */
@@ -177,7 +196,7 @@ const campaigns = {
   list: limit => db.prepare(`${SELECT_C} ORDER BY c.created_at DESC LIMIT ?`).all(limit),
   nextPending: id => db.prepare("SELECT * FROM campaign_items WHERE campaign_id = ? AND state = 'pending' ORDER BY id LIMIT 1").get(id),
   hasPending: id => !!db.prepare("SELECT 1 FROM campaign_items WHERE campaign_id = ? AND state = 'pending' LIMIT 1").get(id),
-  setStatus: (id, status, note = null) => db.prepare('UPDATE campaigns SET status = ?, note = ?, updated_at = ? WHERE id = ?').run(status, note, now(), id),
+  setStatus: (id, status, note = null, autoResume = 0) => db.prepare('UPDATE campaigns SET status = ?, note = ?, auto_resume = ?, updated_at = ? WHERE id = ?').run(status, note, autoResume ? 1 : 0, now(), id),
   setSession: (id, sid, label) => db.prepare('UPDATE campaigns SET session_id = ?, session_label = ? WHERE id = ?').run(sid, label, id),
   cancelPending: id => db.prepare("UPDATE campaign_items SET state = 'cancelled' WHERE campaign_id = ? AND state = 'pending'").run(id),
   interruptRunning: () => db.prepare("UPDATE campaigns SET status = 'paused', note = 'Interrompue par un redémarrage du serveur.', updated_at = ? WHERE status = 'running'").run(now()),
@@ -185,8 +204,8 @@ const campaigns = {
   record: db.transaction((c, item, state, error) => {
     const t = now();
     db.prepare('UPDATE campaign_items SET state = ?, error = ?, done_at = ? WHERE id = ?').run(state, error || null, t, item.id);
-    db.prepare('INSERT INTO logs(t, campaign_id, phone, email, status, result, error) VALUES (?,?,?,?,?,?,?)')
-      .run(t, c.id, item.phone, item.email, item.status || 'test', RESULT_LABEL[state], error || null);
+    db.prepare('INSERT INTO logs(t, campaign_id, session_id, phone, email, status, result, error) VALUES (?,?,?,?,?,?,?,?)')
+      .run(t, c.id, c.session_id || null, item.phone, item.email, item.status || 'test', RESULT_LABEL[state], error || null);
     if (state === 'sent' && !c.is_test && item.contact_id) db.prepare('UPDATE contacts SET last_sent_at = ? WHERE id = ?').run(t, item.contact_id);
     db.prepare('UPDATE campaigns SET updated_at = ? WHERE id = ?').run(t, c.id);
   }),
@@ -194,6 +213,9 @@ const campaigns = {
 
 /* ---------- Historique ---------- */
 const logs = {
+  add: ({ sessionId, phone, email = '', status = 'api', result, error }) => db.prepare('INSERT INTO logs(t, session_id, phone, email, status, result, error) VALUES (?,?,?,?,?,?,?)').run(now(), sessionId || null, phone, email, status, result, error || null),
+  sentSince: (sessionId, sinceIso) => (sessionId ? db.prepare("SELECT COUNT(*) AS n FROM logs WHERE session_id = ? AND result = 'envoyé' AND t >= ?").get(sessionId, sinceIso).n : 0),
+  firstSent: sessionId => { const r = sessionId && db.prepare("SELECT MIN(t) AS t FROM logs WHERE session_id = ? AND result = 'envoyé'").get(sessionId); return r && r.t ? Date.parse(r.t) : null; },
   recent: n => db.prepare('SELECT t, phone, email, status, result, error FROM logs ORDER BY id DESC LIMIT ?').all(n),
   prune: (keep = 3000) => db.prepare('DELETE FROM logs WHERE id <= (SELECT MAX(id) FROM logs) - ?').run(keep),
 };
@@ -227,6 +249,44 @@ migrateJson();
   for (const n of new Set(names)) { try { segments.create(n, old[n] ?? DEFAULT_TEMPLATES[n] ?? ''); } catch {} }
 })();
 
+/* ---------- Réglages (protections anti-blocage, désinscription) ---------- */
+const settings = {
+  get() { const r = db.prepare("SELECT value FROM meta WHERE key = 'settings'").get(); return { ...limits.DEFAULTS, ...(r ? JSON.parse(r.value) : {}) }; },
+  set(patch) {
+    const next = { ...settings.get(), ...limits.sanitize(patch || {}) };
+    limits.validate(next);
+    db.prepare("INSERT INTO meta(key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(next));
+    return next;
+  },
+};
+
+/* ---------- Réponses reçues ---------- */
+const replies = {
+  add({ sessionId, phone, contactId, body, optout }) {
+    db.prepare('INSERT INTO replies(t, session_id, phone, contact_id, body, optout) VALUES (?,?,?,?,?,?)').run(now(), sessionId || null, phone, contactId || null, String(body || '').slice(0, 2000), optout ? 1 : 0);
+    db.prepare('DELETE FROM replies WHERE id <= (SELECT MAX(id) FROM replies) - 5000').run();
+  },
+  recent: n => db.prepare('SELECT r.t, r.phone, r.body, r.optout, c.name, c.email FROM replies r LEFT JOIN contacts c ON c.id = r.contact_id ORDER BY r.id DESC LIMIT ?').all(n),
+};
+
+/* ---------- Clés d'API et webhooks ---------- */
+const apiKeys = {
+  create: (name, prefix, keyHash, createdBy) => { const id = crypto.randomUUID(); db.prepare('INSERT INTO api_keys(id, name, prefix, key_hash, created_by, created_at) VALUES (?,?,?,?,?,?)').run(id, name, prefix, keyHash, createdBy || null, now()); return id; },
+  list: () => db.prepare('SELECT id, name, prefix, created_by AS createdBy, created_at AS createdAt, last_used_at AS lastUsedAt FROM api_keys ORDER BY created_at').all(),
+  byHash: h => db.prepare('SELECT id, name FROM api_keys WHERE key_hash = ?').get(h),
+  touch: id => db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(now(), id),
+  remove: id => db.prepare('DELETE FROM api_keys WHERE id = ?').run(id).changes,
+};
+const webhooks = {
+  list: () => db.prepare('SELECT id, url, events, active, created_at AS createdAt, last_status AS lastStatus, last_at AS lastAt FROM webhooks ORDER BY created_at').all().map(w => ({ ...w, events: w.events.split(','), active: !!w.active })),
+  get: id => db.prepare('SELECT * FROM webhooks WHERE id = ?').get(id),
+  forEvent: ev => db.prepare('SELECT * FROM webhooks WHERE active = 1').all().filter(w => w.events.split(',').includes(ev)),
+  create: (url, secret, events) => { const id = crypto.randomUUID(); db.prepare('INSERT INTO webhooks(id, url, secret, events, created_at) VALUES (?,?,?,?,?)').run(id, url, secret, events.join(','), now()); return id; },
+  setActive: (id, a) => db.prepare('UPDATE webhooks SET active = ? WHERE id = ?').run(a ? 1 : 0, id),
+  result: (id, status) => db.prepare('UPDATE webhooks SET last_status = ?, last_at = ? WHERE id = ?').run(String(status).slice(0, 80), now(), id),
+  remove: id => db.prepare('DELETE FROM webhooks WHERE id = ?').run(id).changes,
+};
+
 /* ---------- Comptes et sessions de connexion ---------- */
 const users = {
   count: () => db.prepare('SELECT COUNT(*) AS n FROM users').get().n,
@@ -251,4 +311,4 @@ const authSessions = {
   purge: () => db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now()),
 };
 
-module.exports = { contacts, segments, campaigns, logs, users, authSessions, close: () => db.close() };
+module.exports = { contacts, segments, campaigns, logs, users, authSessions, settings, replies, apiKeys, webhooks, close: () => db.close() };

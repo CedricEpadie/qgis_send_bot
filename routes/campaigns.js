@@ -14,7 +14,7 @@ module.exports = runner => {
     const eligible = db.contacts.eligible(seg, skip);
     return {
       segment: seg, eligible, willSend: Math.min(eligible, MAX_PER_RUN), maxPerRun: MAX_PER_RUN,
-      total: db.contacts.eligible(seg, false), sample: db.contacts.recipients(seg, skip, 1)[0] || null,
+      total: db.contacts.eligible(seg, false), optedOut: db.contacts.optedOutCount(seg), sample: db.contacts.recipients(seg, skip, 1)[0] || null,
     };
   }));
 

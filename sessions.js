@@ -2,14 +2,16 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const EventEmitter = require('events');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const MAX_ATTEMPTS = 3;
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
 
-class SessionManager {
+class SessionManager extends EventEmitter {
   constructor({ dataDir }) {
+    super();
     this.dir = path.join(dataDir, 'session');            // dataPath de LocalAuth
     this.metaFile = path.join(dataDir, 'sessions.json');
     this.meta = [];                                      // [{id, name, number, createdAt}]
@@ -153,6 +155,18 @@ class SessionManager {
       rt.status = 'ready'; rt.qr = null; rt.error = null; rt.attempts = 0;
       rt.number = client.info && client.info.wid ? client.info.wid.user : null;
       this._setNumber(id, rt.number);
+    });
+    // Messages reçus (hors groupes, statuts et messages envoyés par nous) : relayés à l'application.
+    client.on('message', async msg => {
+      if (!live()) return;
+      try {
+        const from = String(msg.from || '');
+        if (msg.fromMe || msg.isStatus || from.endsWith('@g.us') || from === 'status@broadcast') return;
+        let phone = from.split('@')[0];
+        if (from.endsWith('@lid')) { const ct = await msg.getContact(); phone = ct && ct.number; }   // identifiants masqués : on retrouve le numéro
+        if (!phone) return;
+        this.emit('message', { sessionId: id, phone, body: String(msg.body || ''), type: msg.type });
+      } catch (e) { console.error(`[session ${id}] message entrant :`, e.message); }
     });
     client.on('auth_failure', msg => live() && this._fail(rt, new Error('Échec d’authentification : ' + msg)));
     client.on('disconnected', reason => live() && this._fail(rt, new Error('Déconnecté (' + reason + ')')));

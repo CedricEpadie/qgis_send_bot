@@ -1,7 +1,7 @@
 'use strict';
 /* ===== État et coquille ===== */
 let S = null, TAB = 'conn', pollTimer = null, offline = false;
-const TABS = [['conn', 'Connexion', 'phone'], ['contacts', 'Contacts', 'users'], ['send', 'Envoi', 'send'], ['hist', 'Historique', 'clock'], ['settings', 'Paramètres', 'settings']];
+const TABS = [['conn', 'Connexion', 'phone'], ['contacts', 'Contacts', 'users'], ['send', 'Envoi', 'send'], ['replies', 'Réponses', 'message'], ['hist', 'Historique', 'clock'], ['settings', 'Paramètres', 'settings']];
 const isAdmin = () => S.me.role === 'admin';
 const seg = name => S.segments.find(s => s.name === name);
 const act = {};
@@ -150,7 +150,7 @@ function paintContacts() {
   const pages = Math.max(1, Math.ceil(C.total / C.size)), all = C.items.length && C.items.every(c => C.sel.has(c.id));
   $('#ctable').innerHTML = C.items.length ? `<table class="tbl"><thead><tr><th style="width:36px"><input type="checkbox" data-act="sel-all" ${all ? 'checked' : ''} aria-label="Tout sélectionner"></th><th>Contact</th><th>Téléphone</th><th>Segment</th><th>Dernier envoi</th><th></th></tr></thead><tbody>${C.items.map(c =>
     `<tr><td><input type="checkbox" data-act="sel" data-id="${esc(c.id)}" ${C.sel.has(c.id) ? 'checked' : ''} aria-label="Sélectionner ${esc(c.name || c.phone)}"></td>
-    <td><b>${esc(c.name || '—')}</b><div class="mute sm">${esc(c.email)}</div></td><td>${esc(fmtPhone(c.phone))}</td><td><span class="badge plain">${esc(c.segment)}</span></td>
+    <td><b>${esc(c.name || '—')}</b><div class="mute sm">${esc(c.email)}</div></td><td>${esc(fmtPhone(c.phone))}</td><td><span class="badge plain">${esc(c.segment)}</span>${c.optedOut ? ' <span class="badge b-err">Désinscrit</span>' : ''}</td>
     <td class="mute sm">${c.lastSentAt ? fmtDate(c.lastSentAt) : 'Jamais'}</td><td style="text-align:right"><button class="btn ghost sm" data-act="edit-contact" data-id="${esc(c.id)}">Modifier</button></td></tr>`).join('')}</tbody></table>`
     : `<div class="empty" style="margin:10px"><h3>${C.q || C.segment ? 'Aucun résultat' : 'Aucun contact'}</h3><p>${C.q || C.segment ? 'Essayez un autre filtre.' : 'Importez un fichier CSV ou ajoutez un premier contact.'}</p></div>`;
   $('#cpager').innerHTML = `<span>${C.total} contact(s)</span><span class="row"><button class="btn sm" data-act="page" data-id="-1" ${C.page <= 1 ? 'disabled' : ''}>Précédent</button> Page ${C.page} / ${pages} <button class="btn sm" data-act="page" data-id="1" ${C.page >= pages ? 'disabled' : ''}>Suivant</button></span>`;
@@ -175,11 +175,12 @@ act['del-all'] = async () => {
   await api('/api/contacts', { method: 'DELETE' }); ui.toast('Tous les contacts ont été supprimés.'); await refresh(); await loadContacts();
 };
 
-const contactFields = (c = {}) => [
+const contactFields = (c = {}, edit = false) => [
   { name: 'phone', label: 'Téléphone WhatsApp', value: c.phone ? '+' + c.phone : '', placeholder: '+237 6 99 99 99 99', required: true, type: 'tel', hint: 'Avec l’indicatif du pays.' },
   { name: 'name', label: 'Nom', value: c.name || '', placeholder: 'Marie Kamga', maxlength: 80 },
   { name: 'email', label: 'E-mail', value: c.email || '', type: 'email' },
-  { name: 'segment', label: 'Segment', type: 'select', value: c.segment || (C.segment || S.segments[0]?.name), options: S.segments.map(s => ({ value: s.name, label: s.name })), required: true }];
+  { name: 'segment', label: 'Segment', type: 'select', value: c.segment || (C.segment || S.segments[0]?.name), options: S.segments.map(s => ({ value: s.name, label: s.name })), required: true },
+  ...(edit ? [{ name: 'optedOut', type: 'checkbox', label: 'Désinscrit : ne plus lui envoyer de messages', value: !!c.optedOut }] : [])];
 async function ensureSegments() {
   if (S.segments.length) return true;
   await ui.alert({ title: 'Créez d’abord un segment', message: 'Un segment regroupe vos contacts (par exemple « Donateurs »). Créez-en un dans Paramètres, ou importez un fichier CSV : les segments seront créés automatiquement.' });
@@ -194,7 +195,7 @@ act['add-contact'] = async () => {
 };
 act['edit-contact'] = async el => {
   const c = C.items.find(x => x.id === el.dataset.id);
-  const v = await ui.form({ title: 'Modifier le contact', fields: contactFields(c), submit: 'Enregistrer' });
+  const v = await ui.form({ title: 'Modifier le contact', fields: contactFields(c, true), submit: 'Enregistrer' });
   if (!v) return;
   await api('/api/contacts/' + c.id, { method: 'PUT', body: v }); ui.toast('Contact mis à jour.'); await refresh(); await loadContacts();
 };
@@ -251,7 +252,7 @@ function paintCampaign() {
     <p class="mute sm">${esc(c.sessionLabel || '')}${c.createdBy ? ' · lancée par ' + esc(c.createdBy) : ''}</p></div>${badge(c.pausing ? 'Pause en cours…' : lab, c.pausing ? 'warn' : tone)}</div>
     <div class="bar mt" role="progressbar" aria-valuemin="0" aria-valuemax="${c.total}" aria-valuenow="${done + c.cancelled}"><i style="width:${c.total ? ((done + c.cancelled) / c.total) * 100 : 0}%"></i></div>
     <div class="kv"><div><b>${c.sent}</b><span>envoyés</span></div><div><b>${c.skipped}</b><span>ignorés</span></div><div><b>${c.failed}</b><span>échecs</span></div><div><b>${c.pending}</b><span>restants</span></div></div>
-    ${c.current ? `<p class="sm mute">En cours : ${esc(c.current)}</p>` : ''}${c.note ? `<p class="sm" style="color:var(--warn)">${esc(c.note)}</p>` : ''}
+    ${c.current ? `<p class="sm mute">En cours : ${esc(c.current)}</p>` : ''}${c.note ? `<p class="sm" style="color:var(--warn)">${esc(c.note)}${c.autoResume ? ' <span class="badge b-info plain">Reprise automatique</span>' : ''}</p>` : ''}
     ${open ? `<div class="row mt">${c.status === 'running' ? `<button class="btn" data-act="camp" data-id="pause" ${c.pausing ? 'disabled' : ''}>Pause</button>` : `<button class="btn primary" data-act="camp" data-id="resume">Reprendre</button>`}<button class="btn danger" data-act="camp" data-id="stop">Arrêter</button></div>` : ''}</div>`;
 }
 act.camp = async el => {
@@ -281,11 +282,13 @@ function paintWizard() {
       <div class="row"><button class="btn ghost" data-act="step" data-id="1">Retour</button><button class="btn primary" data-act="step" data-id="3">Continuer</button></div></div></div>`;
     const ta = $('#msg'); const upd = () => { W.message = ta.value; $('#bubble').textContent = renderMsg(W.message, sample) || '…'; }; ta.addEventListener('input', upd); upd();
   } else {
-    const a = activeSession(), ready = a && a.status === 'ready', p = W.preview;
+    const a = activeSession(), ready = a && a.status === 'ready', p = W.preview, L = S.limits;
     box.innerHTML = stepper(3) + `<div class="card"><h2>Vérifiez avant de lancer</h2>
       <div class="kv"><div><b>${p ? p.willSend : 0}</b><span>destinataires</span></div><div><b id="est">${fmtDur(estimate())}</b><span>durée estimée</span></div><div><b>${esc(W.segment)}</b><span>segment</span></div></div>
       ${p && p.eligible > p.willSend ? `<p class="sm" style="color:var(--warn)">Limite de ${p.maxPerRun} messages par campagne : ${p.eligible - p.willSend} contact(s) resteront pour la suivante.</p>` : ''}
       <p class="sm mt">Envoi depuis : <b>${ready ? esc(a.name + ' (' + fmtPhone(a.number) + ')') : 'aucun numéro connecté'}</b></p>${ready ? '' : `<p class="sm" style="color:var(--err)">Connectez un numéro dans l’onglet Connexion pour pouvoir lancer l’envoi.</p>`}
+      <p class="sm mt">Protections : ${L.windowEnabled ? `envoi de ${esc(L.windowStart)} à ${esc(L.windowEnd)} (${esc(L.timezone)})` : 'pas de plage horaire'} · ${L.cap ? `${L.sentToday}/${L.cap} messages envoyés aujourd’hui avec ce numéro` : `${L.sentToday} message(s) envoyé(s) aujourd’hui avec ce numéro`}.</p>
+      ${!L.openNow ? '<p class="sm" style="color:var(--warn)">Hors plage horaire : la campagne démarrera automatiquement à l’ouverture.</p>' : ''}${L.cap && p && p.willSend > Math.max(0, L.cap - L.sentToday) ? '<p class="sm" style="color:var(--warn)">Le plafond du jour sera atteint : la campagne s’interrompt, puis reprend automatiquement demain.</p>' : ''}
       <div class="phone mt"><div class="bubble">${esc(renderMsg(W.message, p?.sample || SAMPLE))}</div></div>
       <div class="row mt"><div class="field" style="width:150px;margin:0"><label for="dmin">Pause min. (s)</label><input id="dmin" type="number" min="3" max="600" value="${W.dmin}"></div>
       <div class="field" style="width:150px;margin:0"><label for="dmax">Pause max. (s)</label><input id="dmax" type="number" min="3" max="900" value="${W.dmax}"></div></div><p class="hint">Une pause aléatoire est observée entre deux messages.</p>
@@ -299,7 +302,7 @@ function pvText() {
   if (!W.segment) { el.textContent = 'Sélectionnez un segment.'; nx.disabled = true; return; }
   if (!p) { el.textContent = 'Calcul…'; nx.disabled = true; return; }
   const skipped = p.total - p.eligible;
-  el.textContent = `${p.eligible} destinataire(s) éligible(s) sur ${p.total}${skipped ? ` (${skipped} déjà contacté(s) ignoré(s))` : ''}.`;
+  el.textContent = `${p.eligible} destinataire(s) éligible(s) sur ${p.total}${skipped ? ` (${skipped} déjà contacté(s) ignoré(s))` : ''}.${p.optedOut ? ` ${p.optedOut} contact(s) désinscrit(s) exclu(s).` : ''}`;
   nx.disabled = p.willSend === 0;
 }
 async function loadPreview() {
@@ -347,7 +350,16 @@ act.launch = async () => {
   ui.toast('Campagne lancée.'); W.step = 1; W.preview = null; await refresh();
 };
 
-/* ===== Historique ===== */
+/* ===== Réponses reçues ===== */
+async function renderReplies() {
+  $('#page').innerHTML = '<div class="ph"><div><h1>Réponses</h1><p>Messages reçus de vos contacts sur le numéro actif. Un message « STOP » désinscrit automatiquement le contact.</p></div></div><div id="rbox"><div class="spin"></div></div>';
+  const rs = await api('/api/replies');
+  if (TAB !== 'replies') return;
+  $('#rbox').innerHTML = rs.length ? `<div class="card scroll"><table class="tbl"><thead><tr><th>Date</th><th>Contact</th><th>Message</th></tr></thead><tbody>${rs.map(x => `<tr><td class="sm">${fmtDate(x.t)}</td><td><b>${esc(x.name || 'Inconnu')}</b><div class="mute sm">${esc(fmtPhone(x.phone))}</div></td><td>${esc(x.body)} ${x.optout ? '<span class="badge b-err">Désinscription</span>' : ''}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="empty"><h3>Aucune réponse pour le moment</h3><p>Les messages reçus par le numéro actif apparaîtront ici.</p></div>';
+}
+
+/* ===== Historique =====
 async function renderHist() {
   $('#page').innerHTML = '<div class="ph"><div><h1>Historique</h1><p>Campagnes récentes et derniers envois.</p></div></div><div id="histbox"><div class="spin"></div></div>';
   const [cs, logs] = await Promise.all([api('/api/campaigns'), api('/api/logs')]);
@@ -358,15 +370,18 @@ async function renderHist() {
 }
 
 /* ===== Paramètres : segments, utilisateurs, compte ===== */
-let USERS = [];
+let USERS = [], LIM = null, KEYS = [], HOOKS = { items: [], events: [] };
 async function renderSettings() {
-  if (isAdmin()) USERS = await api('/api/users');
+  LIM = await api('/api/settings');
+  if (isAdmin()) [USERS, KEYS, HOOKS] = await Promise.all([api('/api/users'), api('/api/keys'), api('/api/webhooks')]);
   if (TAB !== 'settings') return;
   $('#page').innerHTML = `<div class="ph"><div><h1>Paramètres</h1><p>Segments de contacts, utilisateurs et sécurité du compte.</p></div></div>
   <div class="card"><div class="row sb"><div><h2>Segments</h2><p class="mute sm">Regroupez vos contacts ; chaque segment peut avoir son modèle de message.</p></div><button class="btn primary" data-act="new-segment">${ic('plus')}Nouveau segment</button></div>
     ${S.segments.length ? `<div class="scroll mt"><table class="tbl"><thead><tr><th>Segment</th><th>Contacts</th><th>Modèle</th><th></th></tr></thead><tbody>${S.segments.map(s => `<tr><td><b>${esc(s.name)}</b></td><td>${s.count}</td><td class="mute sm">${esc((s.template || '—').slice(0, 70))}</td><td style="text-align:right"><button class="btn ghost sm" data-act="rename-segment" data-id="${esc(s.name)}">Renommer</button> <button class="btn ghost sm" data-act="del-segment" data-id="${esc(s.name)}">Supprimer</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute mt">Aucun segment.</p>'}</div>
+  ${limitsCard()}
   ${isAdmin() ? `<div class="card"><div class="row sb"><div><h2>Utilisateurs</h2><p class="mute sm">Les administrateurs gèrent les numéros et les utilisateurs ; les membres gèrent contacts et envois.</p></div><button class="btn primary" data-act="new-user">${ic('plus')}Ajouter</button></div>
     <div class="scroll mt"><table class="tbl"><thead><tr><th>Identifiant</th><th>Rôle</th><th>Créé le</th><th></th></tr></thead><tbody>${USERS.map(u => `<tr><td><b>${esc(u.username)}</b>${u.username === S.me.username ? ' <span class="mute sm">(vous)</span>' : ''}</td><td>${badge(u.role === 'admin' ? 'Administrateur' : 'Membre', u.role === 'admin' ? 'info' : 'mute')}</td><td class="mute sm">${fmtDate(u.createdAt)}</td><td style="text-align:right"><button class="btn ghost sm" data-act="user-menu" data-id="${esc(u.id)}" aria-haspopup="menu">Actions</button></td></tr>`).join('')}</tbody></table></div></div>` : ''}
+  ${isAdmin() ? integrationsCard() : ''}
   <div class="card"><div class="row sb"><div><h2>Mon compte</h2><p class="mute sm">Connecté en tant que <b>${esc(S.me.username)}</b>.</p></div><button class="btn" data-act="my-password">Changer mon mot de passe</button></div></div>`;
 }
 act['new-segment'] = async () => {
@@ -422,6 +437,7 @@ function route() {
     if (TAB === 'conn') { renderConn(true); maybeAutoQr(); }
     else if (TAB === 'contacts') renderContacts();
     else if (TAB === 'send') { renderSend(); }
+    else if (TAB === 'replies') await renderReplies();
     else if (TAB === 'hist') await renderHist();
     else await renderSettings();
   });
@@ -451,3 +467,70 @@ function loop() { clearTimeout(pollTimer); pollTimer = setTimeout(async () => { 
   shell(); window.addEventListener('hashchange', route); route(); loop();
 })();
 document.addEventListener('focusout', () => { if (sendDirty && TAB === 'send') setTimeout(() => { if (!(document.activeElement && document.activeElement.closest('#wiz'))) renderSend(); }, 0); });
+
+
+/* ===== Paramètres : protections anti-blocage, clés d'API, webhooks ===== */
+const limitsCard = () => {
+  const s = LIM.settings, l = LIM.limits;
+  return `<div class="card"><div class="row sb"><div><h2>Protection anti-blocage</h2><p class="mute sm">Un rythme d’envoi raisonnable réduit le risque de blocage de vos numéros. Une campagne interrompue reprend toute seule.</p></div>${isAdmin() ? '<button class="btn" data-act="edit-limits">Modifier</button>' : ''}</div>
+  <div class="kv"><div><b>${s.windowEnabled ? esc(s.windowStart) + '–' + esc(s.windowEnd) : 'Libre'}</b><span>plage horaire (${esc(s.timezone)})</span></div><div><b>${l.cap ? l.cap : 'Aucun'}</b><span>plafond du jour par numéro</span></div><div><b>${s.warmupEnabled ? 'Active' : 'Désactivée'}</b><span>montée en charge</span></div><div><b>${l.sentToday}</b><span>envoyés aujourd’hui (numéro actif)</span></div></div>
+  <p class="hint">Désinscription automatique : un message correspondant à l’un de ces mots déclenche l’exclusion du contact (${esc(s.optoutKeywords)}).</p></div>`;
+};
+act['edit-limits'] = async () => {
+  const s = LIM.settings, num = (name, label, hint) => ({ name, label, type: 'number', value: s[name], hint });
+  const v = await ui.form({ title: 'Protection anti-blocage', size: 'lg', submit: 'Enregistrer', fields: [
+    { name: 'windowEnabled', type: 'checkbox', label: 'Envoyer uniquement pendant une plage horaire', value: s.windowEnabled },
+    { name: 'windowStart', label: 'Début', type: 'time', value: s.windowStart }, { name: 'windowEnd', label: 'Fin', type: 'time', value: s.windowEnd },
+    { name: 'timezone', label: 'Fuseau horaire', value: s.timezone, hint: 'Exemple : Africa/Douala. La plage et les plafonds journaliers suivent ce fuseau.' },
+    num('dailyCap', 'Plafond de messages par jour et par numéro', '0 = illimité.'),
+    { name: 'warmupEnabled', type: 'checkbox', label: 'Montée en charge progressive (pour un numéro récent)', value: s.warmupEnabled },
+    num('warmupStart', 'Messages le premier jour'), num('warmupStep', 'Augmentation par jour'),
+    { name: 'optoutKeywords', label: 'Mots-clés de désinscription', value: s.optoutKeywords, hint: 'Séparés par des virgules.' },
+    { name: 'optoutReply', type: 'textarea', label: 'Réponse automatique à une désinscription', value: s.optoutReply, hint: 'Laisser vide pour ne rien répondre.' }],
+    validate: async x => { try { await api('/api/settings', { method: 'PUT', body: { ...x, dailyCap: +x.dailyCap, warmupStart: +x.warmupStart, warmupStep: +x.warmupStep } }); return ''; } catch (e) { return e.message; } } });
+  if (v) { ui.toast('Protections enregistrées.'); await renderSettings(); }
+};
+
+const integrationsCard = () => `<div class="card"><div class="row sb"><div><h2>Clés d’API</h2><p class="mute sm">Permettent à un autre outil (n8n, un site, un script) d’ajouter des contacts, d’envoyer un message ou de lancer une campagne. Voir API.md.</p></div><button class="btn primary" data-act="new-key">${ic('plus')}Créer une clé</button></div>
+  ${KEYS.length ? `<div class="scroll mt"><table class="tbl"><thead><tr><th>Nom</th><th>Clé</th><th>Créée</th><th>Dernier usage</th><th></th></tr></thead><tbody>${KEYS.map(k => `<tr><td><b>${esc(k.name)}</b></td><td class="mute sm">${esc(k.prefix)}…</td><td class="mute sm">${fmtDate(k.createdAt)}</td><td class="mute sm">${k.lastUsedAt ? fmtDate(k.lastUsedAt) : 'Jamais'}</td><td style="text-align:right"><button class="btn ghost sm" data-act="del-key" data-id="${esc(k.id)}">Révoquer</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute mt">Aucune clé.</p>'}</div>
+  <div class="card"><div class="row sb"><div><h2>Webhooks</h2><p class="mute sm">Notifient votre outil quand un message est reçu, qu’un contact se désinscrit ou qu’une campagne se termine. Chaque envoi est signé (HMAC).</p></div><button class="btn primary" data-act="new-hook">${ic('plus')}Ajouter</button></div>
+  ${HOOKS.items.length ? `<div class="scroll mt"><table class="tbl"><thead><tr><th>Adresse</th><th>Événements</th><th>Dernier envoi</th><th></th></tr></thead><tbody>${HOOKS.items.map(h => `<tr><td class="sm"><b>${esc(h.url)}</b></td><td class="mute sm">${h.events.map(esc).join(', ')}</td><td class="sm">${h.active ? badge(h.lastStatus || 'Jamais', /^OK/.test(h.lastStatus || '') ? 'ok' : h.lastStatus ? 'err' : 'mute') : badge('Désactivé', 'mute')}</td><td style="text-align:right"><button class="btn ghost sm" data-act="hook-menu" data-id="${esc(h.id)}" aria-haspopup="menu">Actions</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute mt">Aucun webhook.</p>'}</div>`;
+
+const secretModal = (title, label, value, extra = '') => ui.modal({ title, body: `<p class="mute sm">${label} <b>Elle ne sera plus jamais affichée</b> : copiez-la maintenant.</p>
+  <div class="row mt"><input readonly id="secretval" value="${esc(value)}" aria-label="${esc(label)}" class="grow"><button class="btn" data-act="copy-secret">${ic('copy')}Copier</button></div>${extra}`, actions: [{ label: 'J’ai copié', kind: 'primary' }], dismissible: false });
+act['copy-secret'] = async el => {
+  const i = $('#secretval'); i.select();
+  try { await navigator.clipboard.writeText(i.value); ui.toast('Copié dans le presse-papiers.'); } catch { document.execCommand && document.execCommand('copy'); ui.toast('Sélectionné : copiez avec Ctrl+C.'); }
+};
+act['new-key'] = async () => {
+  const v = await ui.form({ title: 'Créer une clé d’API', fields: [{ name: 'name', label: 'Nom de la clé', placeholder: 'Ex. n8n, site web', required: true, maxlength: 60 }], submit: 'Créer' });
+  if (!v) return;
+  const r = await api('/api/keys', { method: 'POST', body: { name: v.name } });
+  secretModal('Votre clé d’API', 'Clé :', r.key, `<p class="hint mt">Exemple : <code>curl -H "Authorization: Bearer ${esc(r.key.slice(0, 8))}…" ${esc(location.origin)}/api/v1/segments</code></p>`);
+  await renderSettings();
+};
+act['del-key'] = async el => {
+  const k = KEYS.find(x => x.id === el.dataset.id);
+  if (await ui.confirm({ title: 'Révoquer cette clé ?', html: `Les outils qui utilisent la clé « <b>${esc(k.name)}</b> » ne pourront plus se connecter.`, confirmText: 'Révoquer', danger: true })) { await api('/api/keys/' + k.id, { method: 'DELETE' }); ui.toast('Clé révoquée.'); await renderSettings(); }
+};
+const EVL = { 'message.received': 'Message reçu', 'contact.opted_out': 'Contact désinscrit', 'campaign.finished': 'Campagne terminée' };
+act['new-hook'] = async () => {
+  let created = null;
+  const v = await ui.form({ title: 'Ajouter un webhook', size: 'lg', submit: 'Créer', fields: [
+    { name: 'url', label: 'Adresse de réception (URL)', placeholder: 'https://exemple.org/webhook', required: true, type: 'url', maxlength: 500, hint: 'Les adresses du réseau interne sont refusées.' },
+    ...HOOKS.events.map(e => ({ name: e, type: 'checkbox', label: EVL[e] || e, value: true }))],
+    validate: async x => { try { created = await api('/api/webhooks', { method: 'POST', body: { url: x.url, events: HOOKS.events.filter(e => x[e]) } }); return ''; } catch (e) { return e.message; } } });
+  if (!v || !created) return;
+  secretModal('Secret du webhook', 'Secret de signature :', created.secret, '<p class="hint mt">Utilisez-le pour vérifier l’en-tête <code>X-Webhook-Signature</code> (HMAC SHA-256 du corps de la requête).</p>');
+  await renderSettings();
+};
+act['hook-menu'] = el => {
+  const h = HOOKS.items.find(x => x.id === el.dataset.id);
+  ui.menu(el, [{ label: 'Envoyer un test', act: 'hook-test', id: h.id }, { label: h.active ? 'Désactiver' : 'Activer', act: 'hook-toggle', id: h.id }, { label: 'Supprimer', act: 'hook-del', id: h.id, danger: true }]);
+};
+act['hook-test'] = async el => { await api(`/api/webhooks/${el.dataset.id}/test`, { method: 'POST' }); ui.toast('Test envoyé : le récepteur a répondu.'); await renderSettings(); };
+act['hook-toggle'] = async el => { const h = HOOKS.items.find(x => x.id === el.dataset.id); await api('/api/webhooks/' + h.id, { method: 'PUT', body: { active: !h.active } }); await renderSettings(); };
+act['hook-del'] = async el => {
+  const h = HOOKS.items.find(x => x.id === el.dataset.id);
+  if (await ui.confirm({ title: 'Supprimer ce webhook ?', html: `<b>${esc(h.url)}</b> ne recevra plus d’événements.`, confirmText: 'Supprimer', danger: true })) { await api('/api/webhooks/' + h.id, { method: 'DELETE' }); ui.toast('Webhook supprimé.'); await renderSettings(); }
+};

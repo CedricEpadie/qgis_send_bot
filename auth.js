@@ -88,7 +88,21 @@ const originCheck = (req, res, next) => {
   res.status(403).json({ error: 'Origine refusée.' });
 };
 
+/* ---- clés d'API (en-tête « Authorization: Bearer wab_… ») : 120 requêtes / minute par clé ---- */
+const newApiKey = () => { const key = 'wab_' + crypto.randomBytes(24).toString('hex'); return { key, prefix: key.slice(0, 8), hash: sha(key) }; };
+const apiCalls = new Map();
+const apiKeyAuth = (req, res, next) => {
+  const m = String(req.headers.authorization || '').match(/^Bearer\s+(\S+)$/i), k = m && db.apiKeys.byHash(sha(m[1]));
+  if (!k) return res.status(401).json({ error: 'Clé d’API invalide ou manquante.' });
+  const now = Date.now(), r = apiCalls.get(k.id);
+  if (!r || now - r.t >= 60000) apiCalls.set(k.id, { n: 1, t: now });
+  else if (++r.n > 120) return res.status(429).json({ error: 'Trop de requêtes (120 par minute).' });
+  db.apiKeys.touch(k.id);
+  req.user = { id: null, username: 'api:' + k.name, role: 'member' };
+  next();
+};
+
 module.exports = {
-  bootstrap, login, createSession, hashPassword, verifyPassword, checkPassword, checkUsername,
+  newApiKey, apiKeyAuth, bootstrap, login, createSession, hashPassword, verifyPassword, checkPassword, checkUsername,
   sha, readCookie, setCookie, current, require: require_, page, requireRole, originCheck,
 };
