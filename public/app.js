@@ -359,7 +359,7 @@ async function renderReplies() {
     : '<div class="empty"><h3>Aucune réponse pour le moment</h3><p>Les messages reçus par le numéro actif apparaîtront ici.</p></div>';
 }
 
-/* ===== Historique =====
+/* ===== Historique ===== */
 async function renderHist() {
   $('#page').innerHTML = '<div class="ph"><div><h1>Historique</h1><p>Campagnes récentes et derniers envois.</p></div></div><div id="histbox"><div class="spin"></div></div>';
   const [cs, logs] = await Promise.all([api('/api/campaigns'), api('/api/logs')]);
