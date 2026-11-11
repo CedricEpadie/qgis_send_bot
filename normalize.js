@@ -17,6 +17,6 @@ const normPhone = raw => {
   return /^\d{8,15}$/.test(s) ? s : null;
 };
 
-const render = (t, c) => t.replace(/\{email\}/g, c.email || '').replace(/\{phone\}/g, c.phone);
+const render = (t, c) => t.replace(/\{name\}/g, c.name || '').replace(/\{email\}/g, c.email || '').replace(/\{phone\}/g, c.phone);
 
 module.exports = { normStatus, normPhone, render };

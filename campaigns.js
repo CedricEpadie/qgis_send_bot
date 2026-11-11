@@ -27,13 +27,13 @@ class CampaignRunner {
     if (!c) return null;
     const active = this.id === c.id;
     return {
-      id: c.id, status: c.status, note: c.note, isTest: !!c.is_test, groupStatus: c.group_status,
+      id: c.id, status: c.status, note: c.note, createdBy: c.created_by, isTest: !!c.is_test, groupStatus: c.group_status,
       sessionLabel: c.session_label, pausing: active && !!this.want, current: active ? this.currentLabel : '',
       total: c.total, sent: c.sent, failed: c.failed, skipped: c.skipped, cancelled: c.cancelled, pending: c.pending,
     };
   }
 
-  start({ status, message, testNumber, skipContacted = true, delayMin, delayMax }) {
+  start({ segment, message, testNumber, skipContacted = true, delayMin, delayMax, createdBy }) {
     if (db.campaigns.unfinished()) throw new HttpError(409, 'Une campagne est déjà en cours ou en pause : reprenez-la ou arrêtez-la.');
     this._needClient();
     if (!message || !String(message).trim()) throw new HttpError(400, 'Le message est vide.');
@@ -42,13 +42,16 @@ class CampaignRunner {
     if (testNumber) {
       const p = normPhone(testNumber);
       if (!p) throw new HttpError(400, 'Numéro de test invalide.');
-      list = [{ phone: p, email: 'test' }];
+      list = [{ phone: p, email: 'test', name: 'Test' }];
     } else {
-      list = db.contacts.recipients(status, !!skipContacted, MAX_PER_RUN);
+      const seg = db.segments.canonical(segment);
+      if (!seg) throw new HttpError(400, 'Choisissez un segment.');
+      segment = seg;
+      list = db.contacts.recipients(seg, !!skipContacted, MAX_PER_RUN);
     }
     if (!list.length) throw new HttpError(400, 'Aucun destinataire pour ce filtre.');
     const s = this._session();
-    const id = db.campaigns.create({ isTest: !!testNumber, groupStatus: testNumber ? null : status, message: String(message),
+    const id = db.campaigns.create({ isTest: !!testNumber, groupStatus: testNumber ? null : segment, message: String(message), createdBy,
       delayMin: min, delayMax: max, sessionId: s.id, sessionLabel: s.label }, list);
     this._run(id);
     return { started: list.length, id };

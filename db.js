@@ -3,8 +3,9 @@ const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { DATA, STATUSES } = require('./config');
+const { DATA } = require('./config');
 const { normPhone, normStatus } = require('./normalize');
+const { HttpError } = require('./http');
 
 const db = new Database(path.join(DATA, 'app.db'));
 db.pragma('journal_mode = WAL');
@@ -31,33 +32,117 @@ CREATE TABLE IF NOT EXISTS logs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, campaign_id TEXT, phone TEXT NOT NULL,
   email TEXT NOT NULL DEFAULT '', status TEXT, result TEXT NOT NULL, error TEXT);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS segments(name TEXT PRIMARY KEY COLLATE NOCASE, template TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS users(
+  id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_sessions(
+  token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
 `);
+const addCol = (t, c, def) => { if (!db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
+addCol('contacts', 'name', "TEXT NOT NULL DEFAULT ''");        // NB : la colonne contacts.status contient le SEGMENT
+addCol('campaign_items', 'name', "TEXT NOT NULL DEFAULT ''");
+addCol('campaigns', 'created_by', 'TEXT');
 
 const now = () => new Date().toISOString();
 const like = s => '%' + String(s).replace(/[\\%_]/g, '\\$&') + '%';
-const toContact = r => ({ id: r.id, phone: r.phone, email: r.email, status: r.status, lastSentAt: r.last_sent_at });
+const toContact = r => ({ id: r.id, phone: r.phone, name: r.name, email: r.email, segment: r.status, lastSentAt: r.last_sent_at });
+
+/* ---------- Segments (groupes libres) ---------- */
+const DEFAULT_TEMPLATES = {
+  'yes': 'Bonjour {name}, merci pour votre contribution à l’association ! 🙏',
+  'no': 'Bonjour {name}, nous serions heureux de vous compter parmi les contributeurs. Souhaitez-vous en savoir plus ?',
+  'More information needed': 'Bonjour {name}, voici les informations demandées sur la contribution des membres : ...',
+};
+const cleanSeg = s => String(s || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+const segments = {
+  list: () => db.prepare('SELECT s.name, s.template, (SELECT COUNT(*) FROM contacts c WHERE c.status = s.name) AS count FROM segments s ORDER BY s.position, s.rowid').all(),
+  canonical: name => { const r = db.prepare('SELECT name FROM segments WHERE name = ?').get(cleanSeg(name)); return r ? r.name : null; },
+  create(name, template = '') {
+    const n = cleanSeg(name);
+    if (!n) throw new HttpError(400, 'Le nom du segment est vide.');
+    if (segments.canonical(n)) throw new HttpError(409, 'Ce segment existe déjà.');
+    const pos = db.prepare('SELECT COALESCE(MAX(position), 0) + 1 AS p FROM segments').get().p;
+    db.prepare('INSERT INTO segments(name, template, position) VALUES (?,?,?)').run(n, String(template), pos);
+    return n;
+  },
+  // Retrouve (ou crée) le segment correspondant à une valeur libre ; « oui/non/more… » restent des alias des segments historiques.
+  resolve(raw) {
+    const n = cleanSeg(raw);
+    if (!n) return null;
+    const alias = normStatus(n);
+    return segments.canonical(n) || (alias && segments.canonical(alias)) || segments.create(n);
+  },
+  rename: db.transaction((name, newName) => {
+    const cur = segments.canonical(name), n = cleanSeg(newName);
+    if (!cur) throw new HttpError(404, 'Segment introuvable.');
+    if (!n) throw new HttpError(400, 'Le nom du segment est vide.');
+    const other = segments.canonical(n);
+    if (other && other !== cur) throw new HttpError(409, 'Ce nom est déjà utilisé.');
+    db.prepare('UPDATE segments SET name = ? WHERE name = ?').run(n, cur);
+    db.prepare('UPDATE contacts SET status = ? WHERE status = ?').run(n, cur);
+    return n;
+  }),
+  setTemplate(name, body) {
+    const cur = segments.canonical(name);
+    if (!cur) throw new HttpError(404, 'Segment introuvable.');
+    db.prepare('UPDATE segments SET template = ? WHERE name = ?').run(String(body), cur);
+  },
+  remove: db.transaction((name, moveTo) => {
+    const cur = segments.canonical(name);
+    if (!cur) throw new HttpError(404, 'Segment introuvable.');
+    const n = db.prepare('SELECT COUNT(*) AS n FROM contacts WHERE status = ?').get(cur).n;
+    if (n) {
+      const target = moveTo && segments.canonical(moveTo);
+      if (!moveTo) throw new HttpError(409, `Ce segment contient ${n} contact(s) : choisissez où les déplacer.`);
+      if (!target || target === cur) throw new HttpError(400, 'Segment de destination invalide.');
+      db.prepare('UPDATE contacts SET status = ? WHERE status = ?').run(target, cur);
+    }
+    db.prepare('DELETE FROM segments WHERE name = ?').run(cur);
+  }),
+};
 
 /* ---------- Contacts (communs à tous les numéros) ---------- */
+const where = ({ segment, q } = {}) => {
+  const w = [], args = [];
+  if (segment) { w.push('status = ?'); args.push(segment); }
+  if (q) {
+    const ql = String(q).toLowerCase().trim(), qd = ql.replace(/\D/g, '');
+    w.push("(lower(name) LIKE ? ESCAPE '\\' OR lower(email) LIKE ? ESCAPE '\\'" + (qd ? " OR phone LIKE ? ESCAPE '\\'" : '') + ')');
+    args.push(like(ql), like(ql)); if (qd) args.push(like(qd));
+  }
+  return { sql: w.length ? ' WHERE ' + w.join(' AND ') : '', args };
+};
 const contacts = {
-  list({ status, q } = {}) {
-    const where = [], args = [];
-    if (status) { where.push('status = ?'); args.push(status); }
-    if (q) {
-      const ql = String(q).toLowerCase().trim(), qd = ql.replace(/\D/g, '');
-      where.push(qd ? "(lower(email) LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\')" : "lower(email) LIKE ? ESCAPE '\\'");
-      args.push(like(ql)); if (qd) args.push(like(qd));
-    }
-    const sql = 'SELECT * FROM contacts' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY created_at, rowid';
-    return db.prepare(sql).all(...args).map(toContact);
+  list({ segment, q, page = 1, size } = {}) {
+    const { sql, args } = where({ segment, q });
+    const total = db.prepare('SELECT COUNT(*) AS n FROM contacts' + sql).get(...args).n;
+    let query = 'SELECT * FROM contacts' + sql + ' ORDER BY created_at, rowid', a = args;
+    if (size) { query += ' LIMIT ? OFFSET ?'; a = [...args, size, (Math.max(1, page) - 1) * size]; }
+    return { items: db.prepare(query).all(...a).map(toContact), total };
   },
-  upsert({ email, status, phone }) {
-    const p = normPhone(phone), st = normStatus(status), em = String(email || '').trim();
+  all: () => contacts.list().items,
+  upsert({ email, name, segment, phone }) {
+    const p = normPhone(phone), em = String(email || '').trim(), nm = String(name || '').trim().slice(0, 80);
     if (!p) return { error: 'Numéro invalide' };
-    if (!st) return { error: 'Statut invalide (yes / no / More information needed)' };
+    const seg = segments.resolve(segment);
+    if (!seg) return { error: 'Segment manquant' };
     const ex = db.prepare('SELECT id FROM contacts WHERE phone = ?').get(p);
-    if (ex) { db.prepare("UPDATE contacts SET email = CASE WHEN ? != '' THEN ? ELSE email END, status = ? WHERE id = ?").run(em, em, st, ex.id); return { updated: true }; }
-    db.prepare('INSERT INTO contacts(id, phone, email, status, created_at) VALUES (?,?,?,?,?)').run(crypto.randomUUID(), p, em, st, now());
+    if (ex) {
+      db.prepare("UPDATE contacts SET email = CASE WHEN ? != '' THEN ? ELSE email END, name = CASE WHEN ? != '' THEN ? ELSE name END, status = ? WHERE id = ?").run(em, em, nm, nm, seg, ex.id);
+      return { updated: true };
+    }
+    db.prepare('INSERT INTO contacts(id, phone, name, email, status, created_at) VALUES (?,?,?,?,?,?)').run(crypto.randomUUID(), p, nm, em, seg, now());
     return { added: true };
+  },
+  update(id, { phone, name, email, segment }) {
+    const p = normPhone(phone), seg = segments.resolve(segment);
+    if (!db.prepare('SELECT 1 FROM contacts WHERE id = ?').get(id)) throw new HttpError(404, 'Contact introuvable.');
+    if (!p) throw new HttpError(400, 'Numéro invalide.');
+    if (!seg) throw new HttpError(400, 'Segment manquant.');
+    if (db.prepare('SELECT 1 FROM contacts WHERE phone = ? AND id != ?').get(p, id)) throw new HttpError(409, 'Ce numéro existe déjà.');
+    db.prepare('UPDATE contacts SET phone = ?, name = ?, email = ?, status = ? WHERE id = ?').run(p, String(name || '').trim().slice(0, 80), String(email || '').trim(), seg, id);
   },
   importRows: db.transaction(rows => rows.map(r => contacts.upsert(r))),
   exists: id => !!db.prepare('SELECT 1 FROM contacts WHERE id = ?').get(id),
@@ -65,34 +150,9 @@ const contacts = {
   removeMany: db.transaction(ids => ids.reduce((n, id) => n + contacts.remove(id), 0)),
   removeAll: () => db.prepare('DELETE FROM contacts').run().changes,
   resetSent: () => db.prepare('UPDATE contacts SET last_sent_at = NULL').run().changes,
-  total: () => db.prepare('SELECT COUNT(*) n FROM contacts').get().n,
-  counts() {
-    const out = Object.fromEntries(STATUSES.map(s => [s, 0]));
-    for (const r of db.prepare('SELECT status, COUNT(*) n FROM contacts GROUP BY status').all()) if (r.status in out) out[r.status] = r.n;
-    return out;
-  },
-  recipients(status, skipContacted, limit) {
-    return db.prepare(`SELECT * FROM contacts WHERE status = ? ${skipContacted ? 'AND last_sent_at IS NULL' : ''} ORDER BY created_at, rowid LIMIT ?`)
-      .all(status, limit).map(toContact);
-  },
-};
-
-/* ---------- Modèles de message ---------- */
-const DEFAULT_TEMPLATES = {
-  'yes': 'Bonjour, merci pour votre contribution à l’association ! 🙏',
-  'no': 'Bonjour, nous serions heureux de vous compter parmi les contributeurs. Souhaitez-vous en savoir plus ?',
-  'More information needed': 'Bonjour, voici les informations demandées sur la contribution des membres : ...',
-};
-const templates = {
-  all() {
-    const out = { ...DEFAULT_TEMPLATES };
-    for (const r of db.prepare('SELECT status, body FROM templates').all()) out[r.status] = r.body;
-    return out;
-  },
-  set: db.transaction(obj => {
-    for (const [k, v] of Object.entries(obj || {}))
-      if (STATUSES.includes(k)) db.prepare('INSERT INTO templates(status, body) VALUES (?,?) ON CONFLICT(status) DO UPDATE SET body = excluded.body').run(k, String(v));
-  }),
+  total: () => db.prepare('SELECT COUNT(*) AS n FROM contacts').get().n,
+  recipients: (segment, skip, limit) => db.prepare(`SELECT * FROM contacts WHERE status = ? ${skip ? 'AND last_sent_at IS NULL' : ''} ORDER BY created_at, rowid LIMIT ?`).all(segment, limit).map(toContact),
+  eligible: (segment, skip) => db.prepare(`SELECT COUNT(*) AS n FROM contacts WHERE status = ? ${skip ? 'AND last_sent_at IS NULL' : ''}`).get(segment).n,
 };
 
 /* ---------- Campagnes persistantes ---------- */
@@ -104,11 +164,11 @@ const RESULT_LABEL = { sent: 'envoyé', skipped: 'ignoré', failed: 'échec' };
 const campaigns = {
   create: db.transaction((o, recipients) => {
     const id = crypto.randomUUID(), t = now();
-    db.prepare(`INSERT INTO campaigns(id, created_at, updated_at, status, is_test, group_status, message, delay_min, delay_max, session_id, session_label)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, t, t, 'running', o.isTest ? 1 : 0, o.groupStatus || null, o.message, o.delayMin, o.delayMax, o.sessionId || null, o.sessionLabel || null);
-    const ins = db.prepare('INSERT INTO campaign_items(campaign_id, contact_id, phone, email, status) VALUES (?,?,?,?,?)');
-    for (const r of recipients) ins.run(id, r.id || null, r.phone, r.email || '', r.status || null);
+    db.prepare(`INSERT INTO campaigns(id, created_at, updated_at, status, is_test, group_status, message, delay_min, delay_max, session_id, session_label, created_by)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, t, t, 'running', o.isTest ? 1 : 0, o.groupStatus || null, o.message, o.delayMin, o.delayMax, o.sessionId || null, o.sessionLabel || null, o.createdBy || null);
+    const ins = db.prepare('INSERT INTO campaign_items(campaign_id, contact_id, phone, email, name, status) VALUES (?,?,?,?,?,?)');
+    for (const r of recipients) ins.run(id, r.id || null, r.phone, r.email || '', r.name || '', r.segment || null);
     return id;
   }),
   get: id => db.prepare(`${SELECT_C} WHERE c.id = ?`).get(id),
@@ -149,7 +209,7 @@ function migrateJson() {
       if (p && st) db.prepare('INSERT OR IGNORE INTO contacts(id, phone, email, status, last_sent_at, created_at) VALUES (?,?,?,?,?,?)')
         .run(c.id || crypto.randomUUID(), p, c.email || '', st, c.lastSentAt || null, now());
     }
-    templates.set(old.templates);
+    for (const [k, v] of Object.entries(old.templates || {})) db.prepare('INSERT OR REPLACE INTO templates(status, body) VALUES (?,?)').run(k, String(v));
     for (const l of old.logs || []) db.prepare('INSERT INTO logs(t, phone, email, status, result, error) VALUES (?,?,?,?,?,?)')
       .run(l.t || now(), l.phone || '', l.email || '', l.status || null, l.result || '', l.error || null);
     db.prepare("INSERT INTO meta(key, value) VALUES ('json_migrated', ?)").run(now());
@@ -159,4 +219,36 @@ function migrateJson() {
 }
 migrateJson();
 
-module.exports = { contacts, templates, campaigns, logs, close: () => db.close() };
+// Premier démarrage avec la nouvelle version : les groupes existants deviennent des segments (modèles conservés).
+(function seedSegments() {
+  if (db.prepare('SELECT 1 FROM segments').get()) return;
+  const old = Object.fromEntries(db.prepare('SELECT status, body FROM templates').all().map(r => [r.status, r.body]));
+  const names = [...Object.keys(DEFAULT_TEMPLATES), ...db.prepare('SELECT DISTINCT status FROM contacts').all().map(r => r.status)];
+  for (const n of new Set(names)) { try { segments.create(n, old[n] ?? DEFAULT_TEMPLATES[n] ?? ''); } catch {} }
+})();
+
+/* ---------- Comptes et sessions de connexion ---------- */
+const users = {
+  count: () => db.prepare('SELECT COUNT(*) AS n FROM users').get().n,
+  adminCount: () => db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get().n,
+  byName: n => db.prepare('SELECT * FROM users WHERE username = ?').get(n),
+  byId: id => db.prepare('SELECT * FROM users WHERE id = ?').get(id),
+  list: () => db.prepare('SELECT id, username, role, created_at AS createdAt FROM users ORDER BY created_at, rowid').all(),
+  create({ username, passwordHash, role }) {
+    const id = crypto.randomUUID();
+    db.prepare('INSERT INTO users(id, username, password_hash, role, created_at) VALUES (?,?,?,?,?)').run(id, username, passwordHash, role, now());
+    return id;
+  },
+  setPassword: (id, hash) => db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, id),
+  setRole: (id, role) => db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id),
+  remove: id => db.prepare('DELETE FROM users WHERE id = ?').run(id),
+};
+const authSessions = {
+  create: (tokenHash, userId, expiresAt) => db.prepare('INSERT INTO auth_sessions(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)').run(tokenHash, userId, now(), expiresAt),
+  find: tokenHash => db.prepare('SELECT u.id, u.username, u.role FROM auth_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?').get(tokenHash, now()),
+  remove: tokenHash => db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash),
+  removeForUser: userId => db.prepare('DELETE FROM auth_sessions WHERE user_id = ?').run(userId),
+  purge: () => db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now()),
+};
+
+module.exports = { contacts, segments, campaigns, logs, users, authSessions, close: () => db.close() };

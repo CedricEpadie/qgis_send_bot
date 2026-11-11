@@ -1,34 +1,49 @@
 const express = require('express');
-const basicAuth = require('express-basic-auth');
-const fs = require('fs');
 const path = require('path');
-const { PORT, APP_USER, APP_PASSWORD, DATA, MAX_PER_RUN } = require('./config');
+const { PORT, DATA, MAX_PER_RUN } = require('./config');
 const db = require('./db');
+const auth = require('./auth');
 const SessionManager = require('./sessions');
 const CampaignRunner = require('./campaigns');
 
+auth.bootstrap();
 const sessions = new SessionManager({ dataDir: DATA });
 const runner = new CampaignRunner(sessions);
 runner.init();
 sessions.init().catch(e => console.error('Initialisation des sessions :', e));
 
 const app = express();
-app.use(basicAuth({ users: { [APP_USER]: APP_PASSWORD }, challenge: true }));
+app.set('trust proxy', 1);                       // derrière Caddy / Nginx : HTTPS et adresse IP corrects
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin',
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'",
+  });
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
+app.use(auth.originCheck);
 
-const pubDir = fs.existsSync(path.join(__dirname, 'public', 'index.html')) ? path.join(__dirname, 'public') : __dirname;
-app.use(express.static(pubDir, { index: 'index.html' }));
-app.get('/', (req, res) => res.sendFile(path.join(pubDir, 'index.html'), err => {
-  if (err) res.status(500).send('index.html introuvable : placez-le dans le dossier public/');
-}));
+const pub = path.join(__dirname, 'public');
+app.get('/login', (req, res) => (auth.current(req) ? res.redirect('/') : res.sendFile(path.join(pub, 'login.html'))));
+app.use('/api/auth', require('./routes/auth')());
 
+app.use('/api', auth.require);                   // tout le reste de l'API exige une connexion
 app.get('/api/state', (req, res) => res.json({
+  me: { username: req.user.username, role: req.user.role },
   wa: sessions.activeState(), sessions: sessions.list(), campaign: runner.view(),
-  counts: db.contacts.counts(), total: db.contacts.total(), templates: db.templates.all(), maxPerRun: MAX_PER_RUN,
+  segments: db.segments.list(), total: db.contacts.total(), maxPerRun: MAX_PER_RUN,
 }));
 app.use('/api', require('./routes/contacts')());
+app.use('/api', require('./routes/segments')());
 app.use('/api', require('./routes/campaigns')(runner));
 app.use('/api', require('./routes/sessions')(sessions, runner));
+app.use('/api', require('./routes/users')());
+app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue.' }));
+
+app.get('/', auth.page, (req, res) => res.sendFile(path.join(pub, 'index.html')));
+app.use(express.static(pub, { index: false }));
 
 // Arrêt propre (redéploiement) : la campagne en cours reste « en pause » et reprenable.
 const shutdown = async () => {
