@@ -11,15 +11,15 @@ module.exports = () => {
 
   r.get('/users', (req, res) => res.json(db.users.list()));
 
-  r.post('/users', handle(req => {
+  r.post('/users', handle(async req => {
     const { username, password, role = 'member' } = req.body;
     auth.checkUsername(username); auth.checkPassword(password);
     if (!ROLES.includes(role)) throw new HttpError(400, 'Rôle invalide.');
     if (db.users.byName(username)) throw new HttpError(409, 'Cet identifiant existe déjà.');
-    db.users.create({ username, passwordHash: auth.hashPassword(password), role });
+    db.users.create({ username, passwordHash: await auth.hashPassword(password), role });
   }));
 
-  r.put('/users/:id', handle(req => {
+  r.put('/users/:id', handle(async req => {
     const u = db.users.byId(req.params.id);
     if (!u) throw new HttpError(404, 'Utilisateur introuvable.');
     const { role, password } = req.body;
@@ -30,7 +30,7 @@ module.exports = () => {
     }
     if (password !== undefined) {
       auth.checkPassword(password);
-      db.users.setPassword(u.id, auth.hashPassword(password));
+      db.users.setPassword(u.id, await auth.hashPassword(password));
       db.authSessions.removeForUser(u.id);
     }
   }));

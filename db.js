@@ -3,7 +3,7 @@ const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { DATA } = require('./config');
+const { DATA, tighten } = require('./config');
 const { normPhone, normStatus } = require('./normalize');
 const { HttpError } = require('./http');
 const limits = require('./limits');
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS auth_sessions(
   token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
 `);
+tighten();
 const addCol = (t, c, def) => { if (!db.prepare(`PRAGMA table_info(${t})`).all().some(x => x.name === c)) db.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${def}`); };
 addCol('contacts', 'name', "TEXT NOT NULL DEFAULT ''");        // NB : la colonne contacts.status contient le SEGMENT
 addCol('campaign_items', 'name', "TEXT NOT NULL DEFAULT ''");
@@ -240,6 +241,7 @@ function migrateJson() {
   console.log('db.json importé dans SQLite (copie conservée : db.json.migre).');
 }
 migrateJson();
+tighten();
 
 // Premier démarrage avec la nouvelle version : les groupes existants deviennent des segments (modèles conservés).
 (function seedSegments() {

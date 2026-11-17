@@ -3,7 +3,12 @@ const { parse } = require('csv-parse/sync');
 const db = require('../db');
 const { handle, HttpError } = require('../http');
 
-const csvCell = v => (/[",\n;]/.test(v) ? '"' + String(v).replace(/"/g, '""') + '"' : v);
+// Export : une cellule commençant par = + - @ (ou tabulation / retour chariot) pourrait être exécutée comme une formule
+// par un tableur ; on la neutralise avec une apostrophe. À l'import, cette apostrophe est retirée.
+const FORMULA = /^[=+\-@\t\r]/;
+const csvCell = raw => { let v = String(raw ?? ''); if (FORMULA.test(v)) v = "'" + v; return /[",\n;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+const unformula = v => (/^'[=+\-@\t\r]/.test(v) ? v.slice(1) : v);
+const bigJson = express.json({ limit: '10mb' });          // seuls les imports de fichiers acceptent un gros corps (après authentification)
 
 // Lecture d'un CSV : séparateur détecté (, ; tabulation), première ligne = en-têtes.
 function readCsv(text) {
@@ -40,23 +45,23 @@ module.exports = () => {
   }));
   r.put('/contacts/:id', handle(req => { db.contacts.update(req.params.id, req.body); }));
   r.delete('/contacts/:id', handle(req => { db.contacts.remove(req.params.id); }));
-  r.post('/contacts/delete', handle(req => ({ deleted: db.contacts.removeMany(Array.isArray(req.body.ids) ? req.body.ids : []) })));
+  r.post('/contacts/delete', handle(req => ({ deleted: db.contacts.removeMany((Array.isArray(req.body.ids) ? req.body.ids : []).filter(x => typeof x === 'string')) })));
   r.delete('/contacts', handle(() => { db.contacts.removeAll(); }));
   r.post('/reset-sent', handle(() => { db.contacts.resetSent(); }));
 
-  r.post('/import/preview', handle(req => {
+  r.post('/import/preview', bigJson, handle(req => {
     const { headers, data } = readCsv(req.body.csv);
     return { headers, sample: data.slice(0, 5), total: data.length, mapping: guess(headers) };
   }));
 
-  r.post('/import', handle(req => {
+  r.post('/import', bigJson, handle(req => {
     const { headers, data } = readCsv(req.body.csv);
     const m = req.body.mapping || {}, col = k => (Number.isInteger(m[k]) && m[k] >= 0 && m[k] < headers.length ? m[k] : null);
     if (col('phone') === null) throw new HttpError(400, 'Indiquez la colonne qui contient les numéros de téléphone.');
     const def = String(req.body.defaultSegment || '').trim();
     if (col('segment') === null && !def) throw new HttpError(400, 'Choisissez une colonne de segment ou un segment par défaut.');
     const before = new Set(db.segments.list().map(s => s.name));
-    const get = (row, k) => (col(k) === null ? '' : row[col(k)] || '');
+    const get = (row, k) => (col(k) === null ? '' : unformula(row[col(k)] || ''));
     const results = db.contacts.importRows(data.map(row => ({
       phone: get(row, 'phone'), name: get(row, 'name'), email: get(row, 'email'), segment: get(row, 'segment') || def,
     })));

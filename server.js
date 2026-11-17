@@ -7,13 +7,10 @@ const SessionManager = require('./sessions');
 const CampaignRunner = require('./campaigns');
 const provider = require('./providers/whatsappweb');
 
-auth.bootstrap();
 const sessions = new SessionManager({ dataDir: DATA });
 const messenger = provider(sessions);
 const runner = new CampaignRunner(sessions, messenger);
 require('./inbound')(sessions, messenger);
-runner.init();
-sessions.init().catch(e => console.error('Initialisation des sessions :', e));
 
 const app = express();
 app.set('trust proxy', 1);                       // derrière Caddy / Nginx : HTTPS et adresse IP corrects
@@ -21,14 +18,22 @@ app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin',
-    'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'",
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+    'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin',
+    'Content-Security-Policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   });
+  if (req.secure) res.set('Strict-Transport-Security', 'max-age=31536000');
+  if (req.path.startsWith('/api')) res.set('Cache-Control', 'no-store');   // jamais de données personnelles en cache
   next();
 });
-app.use(express.json({ limit: '10mb' }));
+
+// Corps JSON limités à 20 Ko ; seuls les imports de fichiers (après authentification) acceptent 10 Mo.
+const smallJson = express.json({ limit: '20kb' });
+app.use((req, res, next) => (req.path === '/api/import' || req.path === '/api/import/preview' ? next() : smallJson(req, res, next)));
 app.use(auth.originCheck);
 
 const pub = path.join(__dirname, 'public');
+app.get('/healthz', (req, res) => { try { db.contacts.total(); res.json({ ok: true }); } catch { res.status(503).json({ ok: false }); } });
 app.get('/login', (req, res) => (auth.current(req) ? res.redirect('/') : res.sendFile(path.join(pub, 'login.html'))));
 app.use('/api/auth', require('./routes/auth')());
 
@@ -50,6 +55,16 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Route inconnue.' })
 app.get('/', auth.page, (req, res) => res.sendFile(path.join(pub, 'index.html')));
 app.use(express.static(pub, { index: false }));
 
+// Erreurs imprévues (JSON invalide, corps trop gros, bug) : réponse générique, détail uniquement dans les journaux.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  let status = 500, msg = 'Erreur interne.';
+  if (err.type === 'entity.too.large') { status = 413; msg = 'Requête trop volumineuse.'; }
+  else if (err.type === 'entity.parse.failed' || err.type === 'encoding.unsupported') { status = 400; msg = 'Requête invalide (JSON attendu).'; }
+  else console.error('[erreur]', req.method, req.path, err);
+  if (req.path.startsWith('/api')) res.status(status).json({ error: msg }); else res.status(status).type('text').send(msg);
+});
+
 // Arrêt propre (redéploiement) : la campagne en cours reste « en pause » et reprenable.
 const shutdown = async () => {
   if (runner.isRunning()) { runner.pause(); await Promise.race([runner.settled(), new Promise(r => setTimeout(r, 7000))]); }
@@ -58,4 +73,8 @@ const shutdown = async () => {
 };
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 
-app.listen(PORT, () => console.log(`Interface disponible sur http://localhost:${PORT}`));
+auth.bootstrap().then(() => {
+  runner.init();
+  sessions.init().catch(e => console.error('Initialisation des sessions :', e));
+  app.listen(PORT, () => console.log(`Interface disponible sur http://localhost:${PORT}`));
+}).catch(e => { console.error('Démarrage impossible :', e); process.exit(1); });

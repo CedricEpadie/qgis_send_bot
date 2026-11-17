@@ -1,0 +1,17 @@
+# Durcissement du conteneur (optionnel, recommandé). Pour l'activer, ajoutez cette ligne au fichier .env du serveur :
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.hardening.yml
+# Si votre service ne s'appelle pas « app » dans docker-compose.yml, remplacez le nom ci-dessous.
+# Vérifiez ensuite : docker compose up -d --build && docker compose ps (état « healthy ») && docker compose logs app
+services:
+  app:
+    cap_drop: [ALL]                     # aucune capacité Linux supplémentaire (Chromium fonctionne avec --no-sandbox)
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024                    # Chromium crée beaucoup de threads : limite large mais bornée
+    mem_limit: ${APP_MEM_LIMIT:-1536m}  # adaptez à la mémoire du serveur (définir APP_MEM_LIMIT dans .env)
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    # Étape suivante, à activer seulement après test (Chromium a besoin de dossiers inscriptibles) :
+    # read_only: true
+    # tmpfs: [/tmp, /home/node/.cache, /home/node/.config]

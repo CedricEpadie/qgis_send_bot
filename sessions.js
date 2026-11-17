@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const EventEmitter = require('events');
+const { HttpError } = require('./http');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
@@ -104,7 +105,7 @@ class SessionManager extends EventEmitter {
   // ---------- internes ----------
   _lock(fn) { const run = this.chain.then(fn); this.chain = run.catch(() => {}); return run; }
   _find(id) { return this.meta.find(s => s.id === id); }
-  _need(id) { const s = this._find(id); if (!s) throw new Error('Session introuvable.'); return s; }
+  _need(id) { const s = this._find(id); if (!s) throw new HttpError(404, 'Session introuvable.'); return s; }
   _create(name) {
     const s = { id: crypto.randomBytes(4).toString('hex'), name: String(name || '').trim().slice(0, 40) || `Numéro ${this.meta.length + 1}`, number: null, createdAt: Date.now() };
     this.meta.push(s); this._save(); return s;

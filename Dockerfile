@@ -13,12 +13,12 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 
 WORKDIR /app
 
-# package-lock.json est ignoré par le .gitignore du projet -> npm install.
+# Versions figées par package-lock.json (installation reproductible).
 # better-sqlite3 télécharge un binaire précompilé ; à défaut, on installe les outils de compilation.
-COPY package.json ./
-RUN npm install --omit=dev \
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev \
  || (apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
-     && npm install --omit=dev \
+     && npm ci --omit=dev \
      && apt-get purge -y python3 make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*) \
  && npm cache clean --force
 
@@ -29,6 +29,10 @@ RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
 EXPOSE 3010
+
+# « healthy » tant que l'application répond et que la base est accessible
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # Supprime d'éventuels verrous Chromium laissés par un arrêt brutal, puis démarre
 ENTRYPOINT ["dumb-init", "--"]
