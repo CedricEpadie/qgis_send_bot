@@ -8,7 +8,7 @@ Authorization: Bearer wab_xxxxxxxxxxxxxxxx
 Content-Type: application/json
 ```
 
-Limite : 120 requêtes par minute et par clé. Les envois respectent les mêmes protections que l’interface
+Limite : 120 requêtes par minute et par clé ; corps JSON de 20 Ko maximum (8 Mo pour `/media`). Les envois respectent les mêmes protections que l’interface
 (plage horaire, plafond quotidien, contacts désinscrits).
 
 ## Points d’accès
@@ -18,12 +18,15 @@ Limite : 120 requêtes par minute et par clé. Les envois respectent les mêmes 
 | GET | `/segments` | Liste des segments et nombre de contacts |
 | GET | `/contacts?segment=&q=&page=&size=` | Contacts (pagination, 200 max par page) |
 | POST | `/contacts` | Ajoute ou met à jour un contact : `{ "phone": "+237…", "name": "…", "email": "…", "segment": "Donateurs" }` (le segment est créé s’il n’existe pas) |
-| POST | `/messages` | Envoie un message isolé : `{ "to": "+237…", "message": "Bonjour {name}", "name": "Marie" }` |
-| POST | `/campaigns` | Lance une campagne : `{ "segment": "Donateurs", "message": "…", "skipContacted": true, "delayMin": 8, "delayMax": 20 }` |
+| POST | `/media` | Téléverse une photo (JPEG ou PNG, 5 Mo max) : `{ "data": "<base64>" }` → `{ "id": "…" }`. Les métadonnées (GPS, appareil) sont supprimées. |
+| POST | `/messages` | Envoie un message isolé : `{ "to": "+237…", "message": "Bonjour {name}", "name": "Marie", "mediaId": "…" }` (`mediaId` facultatif) |
+| POST | `/campaigns` | Lance une campagne : `{ "segment": "Donateurs", "message": "…", "skipContacted": true, "delayMin": 8, "delayMax": 20, "mediaId": "…" }` |
 | GET | `/campaigns/current` | État de la campagne en cours ou de la dernière |
 | POST | `/campaigns/current/pause` · `/resume` · `/stop` | Pause, reprise, arrêt |
 
 Variables de message : `{name}`, `{email}`, `{phone}`.
+
+**Photo jointe** : téléversez d’abord l’image (`/media`), puis passez son `mediaId`. Le message devient la légende de la photo (1 024 caractères maximum, après remplacement des variables). Les photos non utilisées sont supprimées après 24 h ; celles des campagnes terminées après 60 jours.
 
 Codes d’erreur courants : `400` données invalides, `401` clé invalide, `409` contact désinscrit ou campagne déjà ouverte,
 `422` numéro sans compte WhatsApp, `429` plafond/plage horaire ou trop de requêtes.

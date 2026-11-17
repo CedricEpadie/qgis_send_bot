@@ -5,6 +5,7 @@ const { normPhone, render } = require('./normalize');
 const { HttpError } = require('./http');
 const limits = require('./limits');
 const webhooks = require('./webhooks');
+const mediaStore = require('./media');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Erreurs typiques d'un navigateur qui s'effondre (l'événement « déconnecté » peut arriver juste après).
@@ -39,16 +40,17 @@ class CampaignRunner {
     if (!c) return null;
     const active = this.id === c.id;
     return {
-      id: c.id, status: c.status, note: c.note, createdBy: c.created_by, autoResume: !!c.auto_resume, isTest: !!c.is_test, groupStatus: c.group_status,
+      id: c.id, status: c.status, note: c.note, createdBy: c.created_by, autoResume: !!c.auto_resume, hasMedia: !!c.media_id, isTest: !!c.is_test, groupStatus: c.group_status,
       sessionLabel: c.session_label, pausing: active && !!this.want, current: active ? this.currentLabel : '',
       total: c.total, sent: c.sent, failed: c.failed, skipped: c.skipped, cancelled: c.cancelled, pending: c.pending,
     };
   }
 
-  start({ segment, message, testNumber, skipContacted = true, delayMin, delayMax, createdBy }) {
+  start({ segment, message, testNumber, skipContacted = true, delayMin, delayMax, createdBy, mediaId }) {
     if (db.campaigns.unfinished()) throw new HttpError(409, 'Une campagne est déjà en cours ou en pause : reprenez-la ou arrêtez-la.');
     this._needClient();
     if (!message || !String(message).trim()) throw new HttpError(400, 'Le message est vide.');
+    this._checkMedia(mediaId, String(message));
     const min = Math.max(3, +delayMin || 8), max = Math.max(min, +delayMax || 20);
     let list;
     if (testNumber) {
@@ -64,7 +66,7 @@ class CampaignRunner {
     if (!list.length) throw new HttpError(400, 'Aucun destinataire pour ce filtre.');
     const s = this._session();
     const id = db.campaigns.create({ isTest: !!testNumber, groupStatus: testNumber ? null : segment, message: String(message), createdBy,
-      delayMin: min, delayMax: max, sessionId: s.id, sessionLabel: s.label }, list);
+      delayMin: min, delayMax: max, sessionId: s.id, sessionLabel: s.label, mediaId: mediaId || null }, list);
     this._run(id);
     return { started: list.length, id };
   }
@@ -90,23 +92,32 @@ class CampaignRunner {
   }
 
   // Envoi d'un message isolé (API) : mêmes protections que les campagnes.
-  async sendOne({ phone, message, name }) {
+  async sendOne({ phone, message, name, mediaId }) {
     this._needClient();
     const p = normPhone(phone);
     if (!p) throw new HttpError(400, 'Numéro invalide.');
     if (!message || !String(message).trim()) throw new HttpError(400, 'Le message est vide.');
+    this._checkMedia(mediaId, String(message));
     const known = db.contacts.byPhone(p);
     if (known && known.optedOut) throw new HttpError(409, 'Ce contact s’est désinscrit.');
     const sid = this._activeSessionId(), g = this._gate(sid);
     if (g) throw new HttpError(429, g.note);
     const chat = await this.provider.resolve(p);
     if (!chat) { db.logs.add({ sessionId: sid, phone: p, result: 'ignoré', error: 'Pas de compte WhatsApp' }); throw new HttpError(422, 'Ce numéro n’a pas de compte WhatsApp.'); }
-    await this.provider.send(chat, render(String(message), { name: name || (known && known.name) || '', email: (known && known.email) || '', phone: p }));
+    const text = render(String(message), { name: name || (known && known.name) || '', email: (known && known.email) || '', phone: p });
+    if (mediaId && text.length > mediaStore.CAPTION_MAX) throw new HttpError(400, `Avec une photo, le message est limité à ${mediaStore.CAPTION_MAX} caractères.`);
+    await this.provider.send(chat, text, mediaId ? mediaStore.load(mediaId) : undefined);
     db.logs.add({ sessionId: sid, phone: p, email: (known && known.email) || '', result: 'envoyé' });
     return { sent: true };
   }
 
   /* ---------- interne ---------- */
+  // Photo jointe : elle doit exister et le texte devient sa légende (1 024 caractères maximum).
+  _checkMedia(mediaId, message) {
+    if (!mediaId) return;
+    if (!mediaStore.meta(mediaId)) throw new HttpError(400, 'Photo introuvable (téléversement expiré ?). Ajoutez-la de nouveau.');
+    if (message.length > mediaStore.CAPTION_MAX) throw new HttpError(400, `Avec une photo, le message est limité à ${mediaStore.CAPTION_MAX} caractères.`);
+  }
   _needClient() {
     if (!this.provider.isReady()) throw new HttpError(400, 'WhatsApp n’est pas connecté.');
   }
@@ -142,6 +153,11 @@ class CampaignRunner {
 
   async _loop(id) {
     const c = db.campaigns.get(id);
+    let photo = null;
+    if (c.media_id) {
+      try { photo = mediaStore.load(c.media_id); }
+      catch { return this._end(id, 'paused', 'La photo jointe est introuvable : arrêtez la campagne et recommencez avec une nouvelle photo.'); }
+    }
     for (;;) {
       if (this.want) return this._end(id, this.want === 'stop' ? 'stopped' : 'paused');
       const item = db.campaigns.nextPending(id);
@@ -157,7 +173,11 @@ class CampaignRunner {
         try {
           const chat = await this.provider.resolve(item.phone);
           if (!chat) { state = 'skipped'; error = 'Pas de compte WhatsApp'; }
-          else { await this.provider.send(chat, render(c.message, item)); state = 'sent'; }
+          else {
+            const text = render(c.message, item);
+            if (photo && text.length > mediaStore.CAPTION_MAX) { state = 'failed'; error = `Légende trop longue (plus de ${mediaStore.CAPTION_MAX} caractères)`; }
+            else { await this.provider.send(chat, text, photo || undefined); state = 'sent'; }
+          }
         } catch (e) {
           let lost = !this.provider.isReady();
           if (!lost && CONNECTION_ERROR.test(String(e.message))) { await sleep(2000); lost = !this.provider.isReady(); }

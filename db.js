@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS api_keys(
 CREATE TABLE IF NOT EXISTS webhooks(
   id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL, events TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, last_status TEXT, last_at TEXT);
+CREATE TABLE IF NOT EXISTS media(
+  id TEXT PRIMARY KEY, mime TEXT NOT NULL, size INTEGER NOT NULL, filename TEXT NOT NULL, created_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users(
   id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL);
@@ -56,6 +58,7 @@ addCol('contacts', 'name', "TEXT NOT NULL DEFAULT ''");        // NB : la colonn
 addCol('campaign_items', 'name', "TEXT NOT NULL DEFAULT ''");
 addCol('campaigns', 'created_by', 'TEXT');
 addCol('campaigns', 'auto_resume', 'INTEGER NOT NULL DEFAULT 0');
+addCol('campaigns', 'media_id', 'TEXT');
 addCol('contacts', 'opted_out', 'INTEGER NOT NULL DEFAULT 0');
 addCol('contacts', 'opted_out_at', 'TEXT');
 addCol('logs', 'session_id', 'TEXT');
@@ -184,9 +187,9 @@ const RESULT_LABEL = { sent: 'envoyé', skipped: 'ignoré', failed: 'échec' };
 const campaigns = {
   create: db.transaction((o, recipients) => {
     const id = crypto.randomUUID(), t = now();
-    db.prepare(`INSERT INTO campaigns(id, created_at, updated_at, status, is_test, group_status, message, delay_min, delay_max, session_id, session_label, created_by)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, t, t, 'running', o.isTest ? 1 : 0, o.groupStatus || null, o.message, o.delayMin, o.delayMax, o.sessionId || null, o.sessionLabel || null, o.createdBy || null);
+    db.prepare(`INSERT INTO campaigns(id, created_at, updated_at, status, is_test, group_status, message, delay_min, delay_max, session_id, session_label, created_by, media_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, t, t, 'running', o.isTest ? 1 : 0, o.groupStatus || null, o.message, o.delayMin, o.delayMax, o.sessionId || null, o.sessionLabel || null, o.createdBy || null, o.mediaId || null);
     const ins = db.prepare('INSERT INTO campaign_items(campaign_id, contact_id, phone, email, name, status) VALUES (?,?,?,?,?,?)');
     for (const r of recipients) ins.run(id, r.id || null, r.phone, r.email || '', r.name || '', r.segment || null);
     return id;
@@ -289,6 +292,18 @@ const webhooks = {
   remove: id => db.prepare('DELETE FROM webhooks WHERE id = ?').run(id).changes,
 };
 
+/* ---------- Photos jointes (métadonnées ; les fichiers sont dans data/media) ---------- */
+const media = {
+  add: (id, mime, size, filename, by) => db.prepare('INSERT INTO media(id, mime, size, filename, created_by, created_at) VALUES (?,?,?,?,?,?)').run(id, mime, size, filename, by || null, now()),
+  get: id => db.prepare('SELECT id, mime, size, filename FROM media WHERE id = ?').get(String(id || '')),
+  totalSize: () => db.prepare('SELECT COALESCE(SUM(size), 0) AS n FROM media').get().n,
+  isUsed: id => !!db.prepare('SELECT 1 FROM campaigns WHERE media_id = ?').get(id),
+  // photos jamais utilisées (téléversées puis abandonnées) ou rattachées à une campagne terminée depuis longtemps
+  orphans: beforeIso => db.prepare('SELECT id FROM media m WHERE created_at < ? AND NOT EXISTS (SELECT 1 FROM campaigns c WHERE c.media_id = m.id)').all(beforeIso).map(r => r.id),
+  expired: beforeIso => db.prepare("SELECT DISTINCT media_id AS id FROM campaigns WHERE media_id IS NOT NULL AND status IN ('completed','stopped') AND updated_at < ?").all(beforeIso).map(r => r.id),
+  remove(id) { db.prepare('UPDATE campaigns SET media_id = NULL WHERE media_id = ?').run(id); return db.prepare('DELETE FROM media WHERE id = ?').run(id).changes; },
+};
+
 /* ---------- Comptes et sessions de connexion ---------- */
 const users = {
   count: () => db.prepare('SELECT COUNT(*) AS n FROM users').get().n,
@@ -313,4 +328,4 @@ const authSessions = {
   purge: () => db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now()),
 };
 
-module.exports = { contacts, segments, campaigns, logs, users, authSessions, settings, replies, apiKeys, webhooks, close: () => db.close() };
+module.exports = { contacts, segments, campaigns, logs, users, authSessions, settings, replies, apiKeys, webhooks, media, close: () => db.close() };

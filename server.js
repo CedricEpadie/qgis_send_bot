@@ -6,6 +6,7 @@ const auth = require('./auth');
 const SessionManager = require('./sessions');
 const CampaignRunner = require('./campaigns');
 const provider = require('./providers/whatsappweb');
+const media = require('./media');
 
 const sessions = new SessionManager({ dataDir: DATA });
 const messenger = provider(sessions);
@@ -27,9 +28,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Corps JSON limités à 20 Ko ; seuls les imports de fichiers (après authentification) acceptent 10 Mo.
+// Corps JSON limités à 20 Ko ; seuls les imports CSV (10 Mo) et les photos (8 Mo) sont plus gros.
 const smallJson = express.json({ limit: '20kb' });
-app.use((req, res, next) => (req.path === '/api/import' || req.path === '/api/import/preview' ? next() : smallJson(req, res, next)));
+const BIG_BODY = new Set(['/api/import', '/api/import/preview', '/api/media', '/api/v1/media']);   // fichiers : lus après authentification, par leur propre analyseur
+app.use((req, res, next) => (BIG_BODY.has(req.path) ? next() : smallJson(req, res, next)));
 app.use(auth.originCheck);
 
 const pub = path.join(__dirname, 'public');
@@ -45,6 +47,7 @@ app.get('/api/state', (req, res) => res.json({
   segments: db.segments.list(), total: db.contacts.total(), maxPerRun: MAX_PER_RUN,
 }));
 app.use('/api', require('./routes/contacts')());
+app.use('/api', require('./routes/media')());
 app.use('/api', require('./routes/segments')());
 app.use('/api', require('./routes/campaigns')(runner));
 app.use('/api', require('./routes/sessions')(sessions, runner));
@@ -75,6 +78,7 @@ process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 
 auth.bootstrap().then(() => {
   runner.init();
+  media.cleanup(); setInterval(media.cleanup, 3600 * 1000).unref();   // photos abandonnées ou anciennes
   sessions.init().catch(e => console.error('Initialisation des sessions :', e));
   app.listen(PORT, () => console.log(`Interface disponible sur http://localhost:${PORT}`));
 }).catch(e => { console.error('Démarrage impossible :', e); process.exit(1); });

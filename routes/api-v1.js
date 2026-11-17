@@ -1,7 +1,10 @@
 // API publique (clé d'API) : contacts, segments, message isolé, campagnes.
 const express = require('express');
 const db = require('../db');
+const media = require('../media');
 const { handle, HttpError } = require('../http');
+
+const bigJson = express.json({ limit: '8mb' });
 
 module.exports = runner => {
   const r = express.Router();
@@ -11,7 +14,8 @@ module.exports = runner => {
     res.json({ ...db.contacts.list({ segment: req.query.segment, q: req.query.q, page, size }), page, size });
   });
   r.post('/contacts', handle(req => { const x = db.contacts.upsert(req.body); if (x.error) throw new HttpError(400, x.error); return x; }));
-  r.post('/messages', handle(req => runner.sendOne({ phone: req.body.to, message: req.body.message, name: req.body.name })));
+  r.post('/messages', handle(req => runner.sendOne({ phone: req.body.to, message: req.body.message, name: req.body.name, mediaId: req.body.mediaId })));
+  r.post('/media', bigJson, handle(req => media.save({ data: req.body.data, createdBy: req.user.username })));
   r.post('/campaigns', handle(req => runner.start({ ...req.body, createdBy: req.user.username })));
   r.get('/campaigns/current', (req, res) => res.json(runner.view()));
   for (const a of ['pause', 'resume', 'stop']) r.post('/campaigns/current/' + a, handle(() => runner[a]()));

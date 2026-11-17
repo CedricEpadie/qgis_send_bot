@@ -230,10 +230,40 @@ async function onFile(e) {
 }
 
 /* ===== Envoi : assistant en 3 étapes ===== */
-const W = { step: 1, segment: '', skip: true, message: '', tplFor: '', dmin: 8, dmax: 20, preview: null };
+const W = { step: 1, segment: '', skip: true, message: '', tplFor: '', dmin: 8, dmax: 20, preview: null, media: null };
+const CAPTION_MAX = 1024;   // légende d'une photo WhatsApp
 let sendKey = '', sendDirty = false;
 const campaignOpen = () => S.campaign && ['running', 'paused'].includes(S.campaign.status);
 const activeSession = () => S.sessions.sessions.find(s => s.active);
+/* ---- photo jointe : réduite et ré-encodée dans le navigateur (retire aussi les informations cachées : position, appareil) ---- */
+async function resizeToJpeg(file, max = 1600, quality = 0.85) {
+  let bmp;
+  try { bmp = await createImageBitmap(file); }
+  catch { throw new Error('Cette image ne peut pas être lue. Utilisez une photo JPEG ou PNG.'); }
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height)), w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(bmp, 0, 0, w, h);   // fond blanc : une transparence devient blanche
+  const dataUrl = cv.toDataURL('image/jpeg', quality);
+  return { dataUrl, base64: dataUrl.split(',')[1], width: w, height: h };
+}
+async function onPhoto(e) {
+  const input = e.target, f = input.files && input.files[0];
+  if (!f) return;
+  await run(async () => {
+    if (f.size > 25 * 1024 * 1024) throw new Error('Ce fichier est trop volumineux (25 Mo maximum avant réduction).');
+    const btn = $('[data-act="pick-photo"]'); if (btn) { btn.disabled = true; btn.textContent = 'Envoi de la photo…'; }
+    const img = await resizeToJpeg(f);
+    const r = await api('/api/media', { method: 'POST', body: { data: img.base64 } });
+    W.media = { id: r.id, preview: img.dataUrl, name: (f.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg', size: r.size };
+    ui.toast('Photo ajoutée.');
+  });
+  input.value = '';
+  if (W.step === 2) paintWizard();
+}
+const photoField = () => `<div class="field"><label>Photo (facultatif)</label>${W.media
+  ? `<div class="mediabox"><img src="${esc(W.media.preview)}" alt="Aperçu de la photo jointe"><div class="grow"><b>${esc(W.media.name)}</b><div class="mute sm">${fmtSize(W.media.size)} · le message devient la légende</div></div><button class="btn ghost sm" data-act="remove-photo">Retirer</button></div>`
+  : `<div class="row"><button class="btn" type="button" data-act="pick-photo">${ic('image')}Ajouter une photo</button></div><input type="file" id="photo" accept="image/jpeg,image/png,image/webp" hidden aria-label="Choisir une photo"><span class="hint">JPEG ou PNG. La photo est réduite automatiquement et ses informations cachées (position, appareil) sont supprimées. Avec une photo, le message est limité à ${CAPTION_MAX} caractères.</span>`}</div>`;
+const bubblePhoto = () => (W.media ? `<img class="bimg" src="${esc(W.media.preview)}" alt="Photo jointe">` : '');
 const SAMPLE = { name: 'Marie', email: 'marie@exemple.org', phone: '237600000000' };
 const renderMsg = (t, c) => String(t).replace(/\{name\}/g, c.name || '').replace(/\{email\}/g, c.email || '').replace(/\{phone\}/g, c.phone || '');
 const estimate = () => (W.preview ? W.preview.willSend * ((W.dmin + W.dmax) / 2) : 0);
@@ -248,7 +278,7 @@ function paintCampaign() {
   const c = S.campaign, box = $('#cpanel'); if (!box) return;
   if (!c) { box.innerHTML = ''; return; }
   const done = c.sent + c.failed + c.skipped, open = ['running', 'paused'].includes(c.status), [lab, tone] = CL[c.status] || [c.status, 'mute'];
-  box.innerHTML = `<div class="card" style="margin-bottom:14px"><div class="row sb"><div><h2>${c.isTest ? 'Message de test' : 'Campagne'} ${c.groupStatus ? '· ' + esc(c.groupStatus) : ''}</h2>
+  box.innerHTML = `<div class="card" style="margin-bottom:14px"><div class="row sb"><div><h2>${c.isTest ? 'Message de test' : 'Campagne'} ${c.groupStatus ? '· ' + esc(c.groupStatus) : ''} ${c.hasMedia ? badge('Avec photo', 'info') : ''}</h2>
     <p class="mute sm">${esc(c.sessionLabel || '')}${c.createdBy ? ' · lancée par ' + esc(c.createdBy) : ''}</p></div>${badge(c.pausing ? 'Pause en cours…' : lab, c.pausing ? 'warn' : tone)}</div>
     <div class="bar mt" role="progressbar" aria-valuemin="0" aria-valuemax="${c.total}" aria-valuenow="${done + c.cancelled}"><i style="width:${c.total ? ((done + c.cancelled) / c.total) * 100 : 0}%"></i></div>
     <div class="kv"><div><b>${c.sent}</b><span>envoyés</span></div><div><b>${c.skipped}</b><span>ignorés</span></div><div><b>${c.failed}</b><span>échecs</span></div><div><b>${c.pending}</b><span>restants</span></div></div>
@@ -276,11 +306,12 @@ function paintWizard() {
     const sample = W.preview?.sample || SAMPLE;
     box.innerHTML = stepper(2) + `<div class="card"><h2>Rédigez votre message</h2><div class="row mt" style="align-items:flex-start"><div class="grow" style="min-width:270px">
       <div class="field"><label for="msg">Message</label><textarea id="msg" maxlength="4000">${esc(W.message)}</textarea>
-      <div class="vars">${['{name}', '{email}', '{phone}'].map(v => `<button class="chip" type="button" data-act="ins-var" data-id="${v}">${v}</button>`).join('')}</div><span class="hint">Les variables sont remplacées pour chaque contact.</span></div></div>
-      <div class="grow" style="min-width:260px"><label class="sm" style="font-weight:600">Aperçu</label><div class="phone mt"><div class="bubble" id="bubble"></div></div><p class="hint mt">Exemple avec : ${esc(sample.name || sample.email || fmtPhone(sample.phone))}</p></div></div>
+      <div class="vars">${['{name}', '{email}', '{phone}'].map(v => `<button class="chip" type="button" data-act="ins-var" data-id="${v}">${v}</button>`).join('')}</div><span class="hint">Les variables sont remplacées pour chaque contact.</span><span class="hint" id="cc" aria-live="polite"></span></div>${photoField()}</div>
+      <div class="grow" style="min-width:260px"><label class="sm" style="font-weight:600">Aperçu</label><div class="phone mt"><div class="bubble" id="bubble">${bubblePhoto()}<div id="btxt"></div></div></div><p class="hint mt">Exemple avec : ${esc(sample.name || sample.email || fmtPhone(sample.phone))}</p></div></div>
       <div class="row sb mt"><div class="row"><button class="btn ghost sm" data-act="save-tpl">Enregistrer comme modèle du segment</button><button class="btn ghost sm" data-act="test-send">Envoyer un test</button></div>
       <div class="row"><button class="btn ghost" data-act="step" data-id="1">Retour</button><button class="btn primary" data-act="step" data-id="3">Continuer</button></div></div></div>`;
-    const ta = $('#msg'); const upd = () => { W.message = ta.value; $('#bubble').textContent = renderMsg(W.message, sample) || '…'; }; ta.addEventListener('input', upd); upd();
+    const ta = $('#msg'), cc = $('#cc'); const upd = () => { W.message = ta.value; $('#btxt').textContent = renderMsg(W.message, sample) || '…'; cc.textContent = W.media ? `${W.message.length} / ${CAPTION_MAX} caractères` : ''; cc.style.color = W.media && W.message.length > CAPTION_MAX ? 'var(--err)' : ''; }; ta.addEventListener('input', upd); upd();
+    const pf = $('#photo'); if (pf) pf.addEventListener('change', onPhoto);
   } else {
     const a = activeSession(), ready = a && a.status === 'ready', p = W.preview, L = S.limits;
     box.innerHTML = stepper(3) + `<div class="card"><h2>Vérifiez avant de lancer</h2>
@@ -289,7 +320,7 @@ function paintWizard() {
       <p class="sm mt">Envoi depuis : <b>${ready ? esc(a.name + ' (' + fmtPhone(a.number) + ')') : 'aucun numéro connecté'}</b></p>${ready ? '' : `<p class="sm" style="color:var(--err)">Connectez un numéro dans l’onglet Connexion pour pouvoir lancer l’envoi.</p>`}
       <p class="sm mt">Protections : ${L.windowEnabled ? `envoi de ${esc(L.windowStart)} à ${esc(L.windowEnd)} (${esc(L.timezone)})` : 'pas de plage horaire'} · ${L.cap ? `${L.sentToday}/${L.cap} messages envoyés aujourd’hui avec ce numéro` : `${L.sentToday} message(s) envoyé(s) aujourd’hui avec ce numéro`}.</p>
       ${!L.openNow ? '<p class="sm" style="color:var(--warn)">Hors plage horaire : la campagne démarrera automatiquement à l’ouverture.</p>' : ''}${L.cap && p && p.willSend > Math.max(0, L.cap - L.sentToday) ? '<p class="sm" style="color:var(--warn)">Le plafond du jour sera atteint : la campagne s’interrompt, puis reprend automatiquement demain.</p>' : ''}
-      <div class="phone mt"><div class="bubble">${esc(renderMsg(W.message, p?.sample || SAMPLE))}</div></div>
+      <div class="phone mt"><div class="bubble">${bubblePhoto()}<div>${esc(renderMsg(W.message, p?.sample || SAMPLE))}</div></div></div>
       <div class="row mt"><div class="field" style="width:150px;margin:0"><label for="dmin">Pause min. (s)</label><input id="dmin" type="number" min="3" max="600" value="${W.dmin}"></div>
       <div class="field" style="width:150px;margin:0"><label for="dmax">Pause max. (s)</label><input id="dmax" type="number" min="3" max="900" value="${W.dmax}"></div></div><p class="hint">Une pause aléatoire est observée entre deux messages.</p>
       <div class="row sb mt"><button class="btn ghost" data-act="step" data-id="2">Retour</button><button class="btn primary" data-act="launch" ${ready && p && p.willSend ? '' : 'disabled'}>${ic('send')}Lancer l’envoi</button></div></div>`;
@@ -325,8 +356,14 @@ act['reset-sent'] = async () => {
 act.step = async el => {
   const n = +el.dataset.id;
   if (n === 3 && !W.message.trim()) return ui.alert({ title: 'Message vide', message: 'Rédigez un message avant de continuer.' });
+  if (n === 3 && W.media && W.message.length > CAPTION_MAX) return ui.alert({ title: 'Message trop long', message: `Avec une photo, le message devient la légende et ne peut pas dépasser ${CAPTION_MAX} caractères (actuellement ${W.message.length}).` });
   if (n === 3) await loadPreview();
   W.step = n; paintWizard();
+};
+act['pick-photo'] = () => { const i = $('#photo'); if (i) i.click(); };
+act['remove-photo'] = () => {
+  const id = W.media.id; W.media = null; paintWizard();
+  api('/api/media/' + id, { method: 'DELETE' }).catch(() => {});      // supprime la photo non utilisée (sinon nettoyage automatique sous 24 h)
 };
 act['ins-var'] = el => {
   const ta = $('#msg'), v = el.dataset.id, a = ta.selectionStart ?? ta.value.length, b = ta.selectionEnd ?? a;
@@ -340,14 +377,14 @@ act['test-send'] = async () => {
   if (!W.message.trim()) return ui.alert({ title: 'Message vide', message: 'Rédigez un message avant d’envoyer un test.' });
   const v = await ui.form({ title: 'Envoyer un test', intro: '<p class="mute sm" style="margin-bottom:14px">Le message sera envoyé à ce numéro, avec « Test » comme nom.</p>', fields: [{ name: 'phone', label: 'Numéro de test', placeholder: '+237 6 99 99 99 99', type: 'tel', required: true }], submit: 'Envoyer le test' });
   if (!v) return;
-  await api('/api/send', { method: 'POST', body: { testNumber: v.phone, message: W.message, delayMin: 3, delayMax: 3 } }); ui.toast('Test en cours d’envoi.'); await refresh();
+  await api('/api/send', { method: 'POST', body: { testNumber: v.phone, message: W.message, mediaId: W.media ? W.media.id : undefined, delayMin: 3, delayMax: 3 } }); ui.toast('Test en cours d’envoi.'); await refresh();
 };
 act.launch = async () => {
   const p = W.preview, a = activeSession();
   const ok = await ui.confirm({ title: 'Lancer l’envoi ?', html: `<b>${p.willSend} message(s)</b> seront envoyés depuis <b>${esc(a.name)}</b>, avec une pause de ${W.dmin} à ${W.dmax} s entre deux messages (environ <b>${fmtDur(estimate())}</b>).<br><br>Vous pourrez mettre en pause ou arrêter à tout moment.`, confirmText: 'Lancer l’envoi' });
   if (!ok) return;
-  await api('/api/send', { method: 'POST', body: { segment: W.segment, message: W.message, skipContacted: W.skip, delayMin: W.dmin, delayMax: W.dmax } });
-  ui.toast('Campagne lancée.'); W.step = 1; W.preview = null; await refresh();
+  await api('/api/send', { method: 'POST', body: { segment: W.segment, message: W.message, mediaId: W.media ? W.media.id : undefined, skipContacted: W.skip, delayMin: W.dmin, delayMax: W.dmax } });
+  ui.toast('Campagne lancée.'); W.step = 1; W.preview = null; W.media = null; await refresh();
 };
 
 /* ===== Réponses reçues ===== */
@@ -365,7 +402,7 @@ async function renderHist() {
   const [cs, logs] = await Promise.all([api('/api/campaigns'), api('/api/logs')]);
   if (TAB !== 'hist') return;
   const RES = { 'envoyé': 'ok', 'ignoré': 'warn', 'échec': 'err' };
-  $('#histbox').innerHTML = `<div class="card scroll"><h2 style="margin-bottom:10px">Campagnes</h2>${cs.length ? `<table class="tbl"><thead><tr><th>Date</th><th>Segment</th><th>Numéro</th><th>Par</th><th>Statut</th><th>Résultat</th></tr></thead><tbody>${cs.map(c => { const [l, t] = CL[c.status] || [c.status, 'mute']; return `<tr><td>${fmtDate(c.created_at)}</td><td>${c.is_test ? 'Test' : esc(c.group_status || '')}</td><td class="sm">${esc(c.session_label || '—')}</td><td class="sm">${esc(c.created_by || '—')}</td><td>${badge(l, t)}</td><td class="sm">${c.sent} envoyés · ${c.skipped} ignorés · ${c.failed} échecs${c.pending ? ' · ' + c.pending + ' restants' : ''}${c.cancelled ? ' · ' + c.cancelled + ' annulés' : ''}</td></tr>`; }).join('')}</tbody></table>` : '<p class="mute">Aucune campagne pour le moment.</p>'}</div>
+  $('#histbox').innerHTML = `<div class="card scroll"><h2 style="margin-bottom:10px">Campagnes</h2>${cs.length ? `<table class="tbl"><thead><tr><th>Date</th><th>Segment</th><th>Numéro</th><th>Par</th><th>Statut</th><th>Résultat</th></tr></thead><tbody>${cs.map(c => { const [l, t] = CL[c.status] || [c.status, 'mute']; return `<tr><td>${fmtDate(c.created_at)}</td><td>${c.is_test ? 'Test' : esc(c.group_status || '')}${c.media_id ? ' ' + badge('Photo', 'info') : ''}</td><td class="sm">${esc(c.session_label || '—')}</td><td class="sm">${esc(c.created_by || '—')}</td><td>${badge(l, t)}</td><td class="sm">${c.sent} envoyés · ${c.skipped} ignorés · ${c.failed} échecs${c.pending ? ' · ' + c.pending + ' restants' : ''}${c.cancelled ? ' · ' + c.cancelled + ' annulés' : ''}</td></tr>`; }).join('')}</tbody></table>` : '<p class="mute">Aucune campagne pour le moment.</p>'}</div>
     <div class="card scroll"><h2 style="margin-bottom:10px">Derniers envois</h2>${logs.length ? `<table class="tbl"><thead><tr><th>Date</th><th>Contact</th><th>Segment</th><th>Résultat</th></tr></thead><tbody>${logs.map(x => `<tr><td>${fmtDate(x.t)}</td><td>${esc(x.email || '')} ${esc(fmtPhone(x.phone))}</td><td class="sm">${esc(x.status || '')}</td><td>${badge(x.result, RES[x.result] || 'mute')}${x.error ? ` <span class="sm mute">${esc(x.error)}</span>` : ''}</td></tr>`).join('')}</tbody></table>` : '<p class="mute">Aucun envoi pour le moment.</p>'}</div>`;
 }
 
